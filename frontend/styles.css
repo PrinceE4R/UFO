@@ -1,0 +1,1172 @@
+:root {
+  --bg: #000000;
+  --chrome: #0f1113;
+  --surface: #060809;
+  --stage-bar: #050708;
+  --ice: #eaffff;
+  --ice-dim: #cfe1e2;
+  --muted: #8a9798;
+  --border: rgba(234, 255, 255, 0.24);
+  --border-strong: rgba(234, 255, 255, 0.65);
+  --hover-bg: rgba(234, 255, 255, 0.09);
+  --warn: #ffd166;
+  --warn-bg: #1b1404;
+  --checker-a: #0b0d0e;
+  --tok-kw: #7ce8ff;
+  --tok-str: #a8f0c6;
+  --tok-num: #ffd166;
+  --tok-cmt: #5f6f70;
+  --tok-type: #eaffff;
+  --tok-tag: #8be9fd;
+  --scroll-thumb: rgba(234, 255, 255, 0.22);
+  --scroll-thumb-hover: rgba(234, 255, 255, 0.52);
+  --mono: "JetBrains Mono", "Cascadia Code", "Fira Code", ui-monospace, SFMono-Regular, Consolas, monospace;
+  --sans: "Inter", "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+}
+
+/* ─── Light Mode Theme ──────────────────────────────────────────────────────── */
+html[data-theme="light"] {
+  --bg: #f4f7f7;
+  --chrome: #e6eded;
+  --surface: #ffffff;
+  --stage-bar: #edf2f2;
+  --ice: #0a0f10;
+  --ice-dim: #1c2829;
+  --muted: #4b5a5b;
+  --border: rgba(10, 15, 16, 0.20);
+  --border-strong: rgba(10, 15, 16, 0.58);
+  --hover-bg: rgba(10, 15, 16, 0.08);
+  --warn: #8c5200;
+  --warn-bg: #fff5db;
+  --checker-a: #e2e8e8;
+  --tok-kw: #005b96;
+  --tok-str: #0d6832;
+  --tok-num: #9e4700;
+  --tok-cmt: #6f7c7d;
+  --tok-type: #0a0f10;
+  --tok-tag: #006c7a;
+  --scroll-thumb: rgba(10, 15, 16, 0.22);
+  --scroll-thumb-hover: rgba(10, 15, 16, 0.50);
+}
+
+html[data-theme="light"] .ufo-logo-full,
+html[data-theme="light"] .ufo-logo-compact {
+  filter: brightness(0.08);
+}
+
+html[data-theme="light"] .ufo-badge,
+html[data-theme="light"] .ufo-pill-tag,
+html[data-theme="light"] .ufo-primary-btn,
+html[data-theme="light"] .ufo-marquee {
+  color: #ffffff;
+}
+
+html[data-theme="light"] .ufo-tab.active,
+html[data-theme="light"] .ufo-rail-btn.active,
+html[data-theme="light"] .ufo-mode-btn.active,
+html[data-theme="light"] .ufo-tool-btn.active {
+  color: #ffffff;
+}
+
+html[data-theme="light"] .ufo-drop-card {
+  background: #ffffff;
+}
+
+html[data-theme="light"] .ufo-float-toolbar {
+  background: rgba(237, 242, 242, 0.94);
+}
+
+html[data-theme="light"] .ufo-tool-btn,
+html[data-theme="light"] .ufo-search-input {
+  background: #ffffff;
+}
+
+/* ─── Sleek Minimal Custom Scrollbars (Item 2) ───────────────────────────────── */
+* {
+  box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+*::before, *::after { box-sizing: border-box; }
+
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-thumb-hover);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ice);
+  font-family: var(--sans);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.hidden { display: none !important; }
+
+.ufo-shell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100dvh;
+  background: var(--bg);
+  padding-top: env(safe-area-inset-top);
+}
+
+/* ─── Top Header & Tab Strip (with Hover Animations - Item 1) ────────────────── */
+.ufo-topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 54px;
+  padding: 0 12px;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  user-select: none;
+  transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease;
+}
+
+.ufo-brand {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  cursor: default;
+}
+
+.ufo-logo-full {
+  height: 36px;
+  width: auto;
+  display: block;
+}
+
+.ufo-logo-compact {
+  display: none;
+  height: 32px;
+  width: 40px;
+  object-fit: cover;
+  object-position: left center;
+}
+
+.ufo-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 2px;
+}
+.ufo-tabs::-webkit-scrollbar { display: none; }
+
+@keyframes ufo-tab-in {
+  from { opacity: 0; transform: translateY(4px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.ufo-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px 0 13px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  color: var(--ice);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  flex-shrink: 0;
+  animation: ufo-tab-in 150ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition:
+    transform 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 150ms ease,
+    color 150ms ease,
+    border-color 150ms ease,
+    box-shadow 160ms ease,
+    opacity 150ms ease;
+}
+
+.ufo-tab:hover {
+  transform: translateY(-1.5px);
+  border-color: var(--ice);
+  background: var(--hover-bg);
+  box-shadow: 0 3px 0 var(--border);
+}
+
+.ufo-tab.active {
+  background: var(--ice);
+  color: var(--chrome);
+  border-color: var(--ice);
+  font-weight: 700;
+}
+
+.ufo-tab.active:hover {
+  background: var(--ice);
+  box-shadow: 0 3px 0 var(--border-strong);
+}
+
+.ufo-tab.has-warning:not(.active) {
+  opacity: 0.72;
+  border-color: rgba(234, 255, 255, 0.38);
+}
+.ufo-tab.has-warning:not(.active):hover {
+  opacity: 1;
+}
+
+.ufo-tab-warn {
+  font-size: 13px;
+  color: var(--warn);
+}
+.ufo-tab.active .ufo-tab-warn {
+  color: #8a4b00;
+}
+
+.ufo-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: transparent;
+  border: none;
+  color: inherit;
+  padding: 0;
+  cursor: pointer;
+  font-size: 14px;
+  opacity: 0.72;
+  transition:
+    transform 190ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 140ms ease,
+    color 140ms ease,
+    background-color 140ms ease;
+}
+.ufo-tab-close:hover {
+  opacity: 1;
+  transform: scale(1.2) rotate(90deg);
+  color: #ff5c5c;
+  background: rgba(255, 92, 92, 0.16);
+}
+
+.ufo-drag-spacer {
+  flex: 0 0 12px;
+  height: 100%;
+}
+
+.ufo-win-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.ufo-win-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 30px;
+  background: transparent;
+  color: var(--ice);
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-size: 15px;
+  transition: background-color 140ms ease, border-color 140ms ease, transform 140ms ease;
+}
+.ufo-win-icon:hover {
+  border-color: var(--border-strong);
+  background: var(--hover-bg);
+}
+
+.ufo-win-close {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid var(--ice);
+  background: transparent;
+  color: var(--ice);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+.ufo-win-close:hover {
+  background: var(--ice);
+  color: var(--chrome);
+}
+
+/* ─── Main Workspace ────────────────────────────────────────────────────────── */
+.ufo-workspace {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.ufo-viewport {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+/* ─── True Full-Screen Mode with Floating Edge-Hover Chrome (Item 6) ─────────── */
+.ufo-shell.is-fullscreen .ufo-topbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 95;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+}
+
+.ufo-shell.is-fullscreen .ufo-rail {
+  position: fixed;
+  top: 54px;
+  right: 0;
+  bottom: 0;
+  z-index: 94;
+  box-shadow: -4px 0 18px rgba(0, 0, 0, 0.45);
+}
+
+.ufo-shell.is-fullscreen .ufo-info-drawer {
+  z-index: 96;
+  top: 54px;
+}
+
+.ufo-shell.is-fullscreen .ufo-stage-bar {
+  transition: transform 220ms ease, opacity 200ms ease;
+}
+
+.ufo-shell.is-fullscreen.chrome-hidden .ufo-topbar {
+  transform: translateY(-108%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.ufo-shell.is-fullscreen.chrome-hidden .ufo-rail {
+  transform: translateX(108%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* In fullscreen when chrome is hidden, allow media/images/videos/3D to use 100% height */
+.ufo-shell.is-fullscreen.chrome-hidden .ufo-stage-bar {
+  display: none;
+}
+
+/* ─── Brutalist Welcome / Empty Dropzone (ColorDemo.png aesthetic) ──────────── */
+.ufo-empty {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  background: var(--bg);
+}
+
+.ufo-hero-grid {
+  display: grid;
+  grid-template-columns: 1.15fr 0.95fr;
+  gap: 36px;
+  align-items: center;
+  max-width: 1180px;
+  width: 100%;
+  margin: auto;
+  padding: 36px 36px 28px;
+}
+
+.ufo-badge {
+  display: inline-block;
+  background: var(--ice);
+  color: #000000;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  padding: 4px 10px;
+  margin-bottom: 18px;
+}
+
+.ufo-hero-copy h1 {
+  margin: 0 0 16px;
+  font-size: clamp(36px, 5.4vw, 68px);
+  line-height: 0.96;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  color: var(--ice);
+}
+
+.ufo-lead {
+  margin: 0 0 24px;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.55;
+  max-width: 520px;
+}
+
+.ufo-stats-row {
+  display: flex;
+  gap: 28px;
+  flex-wrap: wrap;
+}
+.ufo-stat {
+  display: flex;
+  flex-direction: column;
+  border-left: 2px solid var(--ice);
+  padding-left: 12px;
+}
+.ufo-stat strong {
+  font-size: 22px;
+  color: var(--ice);
+  font-family: var(--mono);
+}
+.ufo-stat span {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+
+.ufo-drop-card {
+  border: 1px solid var(--ice);
+  background: #020405;
+  padding: 24px;
+  box-shadow: 10px 10px 0 var(--ice-dim);
+}
+
+.ufo-card-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--ice-dim);
+  margin-bottom: 16px;
+}
+
+.ufo-drop-zone {
+  border: 1px dashed var(--border-strong);
+  padding: 30px 18px;
+  text-align: center;
+  cursor: pointer;
+  margin-bottom: 16px;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.ufo-drop-zone:hover {
+  background: var(--hover-bg);
+  border-color: var(--ice);
+}
+
+.ufo-drop-icon {
+  font-size: 34px;
+  color: var(--ice);
+  display: block;
+  margin-bottom: 10px;
+}
+.ufo-drop-title {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  margin-bottom: 6px;
+}
+.ufo-drop-sub {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.ufo-primary-btn {
+  width: 100%;
+  height: 44px;
+  background: var(--ice-dim);
+  color: #000000;
+  border: none;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.ufo-primary-btn:hover {
+  background: var(--ice);
+}
+
+.ufo-drop-hint {
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.ufo-marquee {
+  background: var(--ice-dim);
+  color: #000000;
+  border-top: 1px solid var(--ice);
+  border-bottom: 1px solid var(--ice);
+  overflow: hidden;
+  white-space: nowrap;
+  padding: 7px 0;
+  flex-shrink: 0;
+}
+.ufo-marquee-track {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  animation: ufo-scroll 28s linear infinite;
+}
+@keyframes ufo-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+/* ─── Active File Stage ─────────────────────────────────────────────────────── */
+.ufo-stage {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.ufo-stage-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--stage-bar);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.ufo-stage-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ufo-pill-tag {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--ice);
+  color: #000;
+  padding: 2px 8px;
+  letter-spacing: 0.06em;
+  flex-shrink: 0;
+}
+
+.ufo-stage-basis {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ufo-stage-modes {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.ufo-mode-btn {
+  height: 26px;
+  padding: 0 10px;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.ufo-mode-btn:hover {
+  border-color: var(--ice);
+  color: var(--ice);
+}
+.ufo-mode-btn.active {
+  background: var(--ice);
+  color: #000;
+  border-color: var(--ice);
+  font-weight: 700;
+}
+
+.ufo-warning-banner {
+  background: var(--warn-bg);
+  border-bottom: 1px solid var(--warn);
+  color: var(--warn);
+  padding: 8px 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.ufo-canvas-host {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg);
+}
+
+/* ─── Right Vertical Action Rail (Desktop) ──────────────────────────────────── */
+.ufo-rail {
+  width: 82px;
+  background: var(--chrome);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 12px 6px;
+  gap: 8px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease;
+}
+
+.ufo-rail-btn {
+  width: 100%;
+  padding: 10px 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--ice);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  cursor: pointer;
+  text-align: center;
+  transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+.ufo-rail-btn i { font-size: 19px; }
+.ufo-rail-btn span { font-size: 11px; font-weight: 500; }
+.ufo-rail-btn small { font-size: 9px; color: var(--muted); margin-top: -3px; }
+
+.ufo-rail-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--hover-bg);
+}
+.ufo-rail-btn.active {
+  background: var(--ice);
+  color: var(--chrome);
+}
+.ufo-rail-btn:disabled,
+.ufo-rail-btn.disabled {
+  opacity: 0.36;
+  cursor: not-allowed;
+}
+
+/* ─── Info Slide-over Drawer & Modal ────────────────────────────────────────── */
+.ufo-info-drawer {
+  position: absolute;
+  top: 0;
+  right: 82px;
+  bottom: 0;
+  width: min(390px, 92vw);
+  background: var(--surface);
+  border-left: 1px solid var(--ice);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  box-shadow: -8px 0 0 var(--border);
+}
+
+.ufo-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  background: var(--chrome);
+}
+
+.ufo-drawer-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 14px;
+  font-size: 12px;
+}
+
+.ufo-kv-group {
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+}
+.ufo-kv-group-title {
+  background: var(--chrome);
+  padding: 6px 10px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--ice-dim);
+  border-bottom: 1px solid var(--border);
+}
+.ufo-kv-row {
+  display: grid;
+  grid-template-columns: 115px 1fr;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  word-break: break-word;
+}
+.ufo-kv-row:last-child { border-bottom: none; }
+.ufo-kv-k { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+.ufo-kv-v { color: var(--ice); font-family: var(--mono); font-size: 11px; }
+
+.ufo-entropy-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 42px;
+  padding: 8px 10px;
+  background: var(--bg);
+}
+.ufo-entropy-bar {
+  flex: 1 1 0;
+  background: var(--ice);
+  min-height: 2px;
+}
+
+/* ─── Viewer Surfaces ───────────────────────────────────────────────────────── */
+.ufo-media-stage {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  position: relative;
+  overflow: hidden;
+}
+
+.ufo-img-wrap {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  touch-action: none;
+  cursor: grab;
+  user-select: none;
+  background-image:
+    linear-gradient(45deg, var(--checker-a) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--checker-a) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--checker-a) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--checker-a) 75%);
+  background-size: 20px 20px;
+  background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+}
+.ufo-img-wrap.dragging { cursor: grabbing; }
+.ufo-img-wrap img, .ufo-svg-box img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  transform-origin: center center;
+  will-change: transform;
+  pointer-events: none;
+}
+
+.ufo-float-toolbar {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 6px;
+  background: rgba(15, 17, 19, 0.92);
+  border: 1px solid var(--border-strong);
+  padding: 6px 10px;
+  z-index: 10;
+  flex-wrap: wrap;
+  justify-content: center;
+  max-width: calc(100% - 24px);
+}
+
+.ufo-tool-btn {
+  background: var(--bg);
+  color: var(--ice);
+  border: 1px solid var(--border);
+  padding: 4px 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+.ufo-tool-btn.active, .ufo-tool-btn:hover {
+  background: var(--ice);
+  color: #000;
+}
+
+.ufo-3d-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+  cursor: grab;
+}
+
+.ufo-code-view {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  padding: 12px 0;
+}
+.ufo-code-line {
+  display: flex;
+  padding: 0 14px;
+}
+.ufo-code-line:hover {
+  background: var(--hover-bg);
+}
+.ufo-ln {
+  width: 56px;
+  flex-shrink: 0;
+  color: var(--muted);
+  user-select: none;
+  text-align: right;
+  padding-right: 16px;
+}
+.ufo-lc { white-space: pre; }
+.tok-kw { color: var(--tok-kw); font-weight: 700; }
+.tok-str { color: var(--tok-str); }
+.tok-num { color: var(--tok-num); }
+.tok-cmt { color: var(--tok-cmt); font-style: italic; }
+.tok-type { color: var(--tok-type); text-decoration: underline var(--border); }
+.tok-tag { color: var(--tok-tag); }
+
+.ufo-table-wrap {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.ufo-sheet-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+.ufo-table-scroll {
+  flex: 1 1 auto;
+  overflow: auto;
+}
+.ufo-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.ufo-table th, .ufo-table td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ufo-table th {
+  background: var(--chrome);
+  color: var(--ice);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+.ufo-table tr:hover td {
+  background: var(--hover-bg);
+}
+
+.ufo-hex-table {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  padding: 14px;
+}
+.ufo-hex-row {
+  display: grid;
+  grid-template-columns: 95px 1fr 170px;
+  gap: 14px;
+  padding: 2px 6px;
+}
+.ufo-hex-row:hover { background: var(--hover-bg); }
+.ufo-hex-off { color: var(--muted); }
+.ufo-hex-bytes { color: var(--ice); letter-spacing: 0.03em; }
+.ufo-hex-ascii { color: var(--tok-str); white-space: pre; }
+
+.ufo-doc-view {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 28px 24px 60px;
+  line-height: 1.7;
+  font-size: 14.5px;
+}
+.ufo-doc-section {
+  border: 1px solid var(--border);
+  margin-bottom: 18px;
+  background: var(--surface);
+}
+.ufo-doc-section h3 {
+  margin: 0;
+  padding: 10px 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--border);
+}
+.ufo-doc-section pre {
+  margin: 0;
+  padding: 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--sans);
+  line-height: 1.65;
+}
+
+.ufo-md-body h1, .ufo-md-body h2, .ufo-md-body h3 { color: var(--ice); border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+.ufo-md-body pre.md-code { background: var(--surface); border: 1px solid var(--border); padding: 12px; overflow-x: auto; font-family: var(--mono); }
+.ufo-md-body code { font-family: var(--mono); background: var(--chrome); padding: 1px 5px; }
+.ufo-md-body blockquote { border-left: 3px solid var(--ice); margin-left: 0; padding-left: 14px; color: var(--muted); }
+
+.ufo-archive-entry-btn {
+  background: transparent;
+  color: var(--ice);
+  border: 1px solid var(--border-strong);
+  padding: 3px 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+.ufo-archive-entry-btn:hover { background: var(--ice); color: var(--bg); }
+
+.ufo-font-specimen {
+  padding: 28px;
+  max-width: 960px;
+  margin: 0 auto;
+}
+.ufo-font-svg { width: 100%; max-height: 220px; border: 1px solid var(--border); padding: 16px; background: #040607; }
+
+.ufo-audio-card {
+  border: 1px solid var(--ice);
+  box-shadow: 8px 8px 0 var(--ice-dim);
+  padding: 26px;
+  width: min(580px, 94vw);
+  background: var(--surface);
+}
+.ufo-waveform {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 68px;
+  margin: 16px 0;
+}
+.ufo-wave-bar {
+  flex: 1 1 0;
+  background: var(--ice);
+  min-height: 4px;
+}
+
+/* Loading spinner */
+.ufo-loading {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  z-index: 60;
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  color: #eaffff;
+}
+.ufo-spinner {
+  width: 34px;
+  height: 34px;
+  border: 2px solid rgba(234, 255, 255, 0.25);
+  border-top-color: #eaffff;
+  border-radius: 50%;
+  animation: ufo-spin 650ms linear infinite;
+}
+@keyframes ufo-spin { to { transform: rotate(360deg); } }
+
+.ufo-drag-overlay {
+  position: absolute;
+  inset: 12px;
+  border: 2px dashed var(--ice);
+  background: rgba(0, 0, 0, 0.88);
+  color: #eaffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  pointer-events: none;
+}
+.ufo-drag-frame {
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 16px;
+  letter-spacing: 0.12em;
+}
+.ufo-drag-frame i { display: block; font-size: 44px; margin-bottom: 12px; }
+
+.ufo-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.82);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 16px;
+}
+.ufo-modal-card {
+  width: min(760px, 96vw);
+  max-height: 84dvh;
+  background: var(--surface);
+  border: 1px solid var(--ice);
+  box-shadow: 10px 10px 0 var(--ice-dim);
+  display: flex;
+  flex-direction: column;
+}
+.ufo-modal-body {
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.ufo-search-input {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg);
+  color: var(--ice);
+  border: 1px solid var(--border-strong);
+  font-family: var(--mono);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+/* ─── Mobile & Portrait Viewport Optimization (<= 768px) ────────────────────── */
+@media (max-width: 768px) {
+  .ufo-topbar {
+    height: 48px;
+    padding: 0 8px;
+    gap: 6px;
+  }
+  .ufo-logo-full { display: none; }
+  .ufo-logo-compact { display: block; }
+  .desktop-only { display: none !important; }
+  .ufo-win-close {
+    padding: 0 8px;
+    font-size: 10px;
+  }
+
+  .ufo-workspace {
+    flex-direction: column;
+  }
+
+  .ufo-hero-grid {
+    grid-template-columns: 1fr;
+    padding: 20px 16px;
+    gap: 20px;
+  }
+  .ufo-drop-card {
+    padding: 16px;
+    box-shadow: 6px 6px 0 var(--ice-dim);
+  }
+
+  .ufo-rail {
+    width: 100%;
+    height: calc(64px + env(safe-area-inset-bottom));
+    padding: 6px 4px calc(6px + env(safe-area-inset-bottom));
+    border-left: none;
+    border-top: 1px solid var(--border);
+    flex-direction: row;
+    justify-content: space-around;
+    gap: 2px;
+  }
+  .ufo-rail-btn {
+    padding: 4px 2px;
+    gap: 2px;
+  }
+  .ufo-rail-btn i { font-size: 16px; }
+  .ufo-rail-btn span { font-size: 10px; }
+  .ufo-rail-btn small { display: none; }
+
+  .ufo-shell.is-fullscreen .ufo-rail {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: calc(64px + env(safe-area-inset-bottom));
+  }
+  .ufo-shell.is-fullscreen.chrome-hidden .ufo-rail {
+    transform: translateY(108%);
+  }
+
+  .ufo-info-drawer {
+    right: 0;
+    left: 0;
+    top: 0;
+    bottom: calc(64px + env(safe-area-inset-bottom));
+    width: 100%;
+    border-left: none;
+  }
+
+  .ufo-hex-row {
+    grid-template-columns: 70px 1fr;
+  }
+  .ufo-hex-ascii { display: none; }
+}

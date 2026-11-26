@@ -1,0 +1,5 @@
+/target/
+/assets/
+**/*.rs.bk
+.DS_Store
+Thumbs.db

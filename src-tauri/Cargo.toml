@@ -1,0 +1,27 @@
+[package]
+name = "ufo-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Universal File Opener cross-platform desktop and mobile application (Windows, macOS, Linux, Android, iOS)"
+
+[lib]
+name = "ufo_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "universal-file-opener"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = "2.7"
+
+[dependencies]
+memmap2 = "0.9"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = "2.12"
+ufo-core = { path = "../crates/ufo-core" }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+rfd = "0.17"

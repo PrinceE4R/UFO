@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#000000" />
+  <title>UNIVERSAL FILE OPENER</title>
+  <link rel="stylesheet" href="./vendor/bootstrap-icons/bootstrap-icons.min.css" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div id="ufo-shell" class="ufo-shell">
+    <!-- Top Header / Custom Titlebar & Tab Strip -->
+    <header class="ufo-topbar" id="ufo-topbar">
+      <div class="ufo-brand" id="ufo-brand" data-tauri-drag-region title="Universal File Opener">
+        <img src="./assets/ufo-logo.svg" alt="Universal File Opener" class="ufo-logo-full" data-tauri-drag-region />
+        <img src="./assets/ufo-mark.svg" alt="UFO" class="ufo-logo-compact" />
+      </div>
+
+      <nav class="ufo-tabs" id="ufo-tabs" aria-label="Open files"></nav>
+
+      <div class="ufo-drag-spacer" data-tauri-drag-region></div>
+
+      <div class="ufo-win-controls" id="ufo-win-controls">
+        <button type="button" class="ufo-win-icon" id="btn-formats" title="Supported Formats Catalog">
+          <i class="bi bi-grid-3x3-gap"></i>
+        </button>
+        <button type="button" class="ufo-win-icon desktop-only" id="btn-win-min" title="Minimize">
+          <i class="bi bi-dash-lg"></i>
+        </button>
+        <button type="button" class="ufo-win-icon desktop-only" id="btn-win-max" title="Maximize / Restore">
+          <i class="bi bi-window-stack"></i>
+        </button>
+        <button type="button" class="ufo-win-close" id="btn-win-close" title="Close">CLOSE</button>
+      </div>
+    </header>
+
+    <!-- Main Workspace: Viewport + Right Rail (Desktop) / Bottom Dock (Mobile) -->
+    <main class="ufo-workspace">
+      <section class="ufo-viewport" id="ufo-viewport">
+        <!-- Empty / Welcome Dropzone State -->
+        <div id="ufo-empty" class="ufo-empty">
+          <div class="ufo-hero-grid">
+            <div class="ufo-hero-copy">
+              <span class="ufo-badge">RUST ENGINE · MAGIC-BYTE VERIFIED · ALL PLATFORMS</span>
+              <h1>OPEN ANY<br />FILE FORMAT.</h1>
+              <p class="ufo-lead">
+                Zero-bloat universal file opener engineered in Rust &amp; WebAssembly.
+                Inspect documents, images, RAW photos, 3D meshes, Gaussian splats, STEP CAD,
+                Blender scenes, audio, video, databases, archives, and raw hex in milliseconds.
+              </p>
+              <div class="ufo-stats-row">
+                <div class="ufo-stat"><strong id="stat-formats">980+</strong><span>EXTENSIONS</span></div>
+                <div class="ufo-stat"><strong>23</strong><span>CATEGORIES</span></div>
+                <div class="ufo-stat"><strong>&lt;1ms</strong><span>MAGIC SNIFF</span></div>
+              </div>
+            </div>
+
+            <div class="ufo-drop-card" id="ufo-drop-card">
+              <div class="ufo-card-label">UNIVERSAL INGESTION MODULE</div>
+              <div class="ufo-drop-zone" id="ufo-drop-zone">
+                <i class="bi bi-file-earmark-plus ufo-drop-icon"></i>
+                <div class="ufo-drop-title">DROP ANY FILE HERE</div>
+                <div class="ufo-drop-sub">Images · PDF · DOCX · XLSX · STEP · GLB · PLY/Splat · BLEND · MP4 · SQLite · EXE · ZIP</div>
+              </div>
+              <button type="button" class="ufo-primary-btn" id="btn-hero-open">
+                <i class="bi bi-arrow-right"></i> OPEN FILE(S)
+              </button>
+              <div class="ufo-drop-hint">Supports multi-file tabs, nested archives &amp; ambiguous extension disambiguation</div>
+            </div>
+          </div>
+
+          <div class="ufo-marquee" aria-hidden="true">
+            <div class="ufo-marquee-track">
+              <span>RUST CORE + WASM · ZERO-COPY MMAP · BOOTSTRAP UI · MAGIC-BYTE DISAMBIGUATION · WINDOWS · MACOS · LINUX · ANDROID · IOS · WEB · </span>
+              <span>RUST CORE + WASM · ZERO-COPY MMAP · BOOTSTRAP UI · MAGIC-BYTE DISAMBIGUATION · WINDOWS · MACOS · LINUX · ANDROID · IOS · WEB · </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Active Document Container -->
+        <div id="ufo-stage" class="ufo-stage hidden">
+          <div class="ufo-stage-bar" id="ufo-stage-bar">
+            <div class="ufo-stage-meta">
+              <span class="ufo-pill-tag" id="stage-format-tag">FORMAT</span>
+              <span class="ufo-stage-basis" id="stage-basis"></span>
+            </div>
+            <div class="ufo-stage-modes" id="stage-modes">
+              <button type="button" class="ufo-mode-btn active" data-mode="preview"><i class="bi bi-eye"></i> VIEW</button>
+              <button type="button" class="ufo-mode-btn" data-mode="hex"><i class="bi bi-file-binary"></i> HEX</button>
+              <button type="button" class="ufo-mode-btn" data-mode="strings"><i class="bi bi-alphabet"></i> STRINGS</button>
+            </div>
+          </div>
+
+          <div id="ufo-warning-banner" class="ufo-warning-banner hidden"></div>
+          <div id="ufo-canvas-host" class="ufo-canvas-host"></div>
+        </div>
+
+        <!-- Async Loading Indicator -->
+        <div id="ufo-loading" class="ufo-loading hidden">
+          <div class="ufo-spinner"></div>
+          <span id="ufo-loading-label">OPENING FILE...</span>
+        </div>
+
+        <!-- Drag Overlay -->
+        <div id="ufo-drag-overlay" class="ufo-drag-overlay hidden">
+          <div class="ufo-drag-frame">
+            <i class="bi bi-cloud-upload"></i>
+            <span>RELEASE TO OPEN IN UFO</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Vertical Action Rail (Desktop) / Bottom Dock (Mobile) -->
+      <aside class="ufo-rail" id="ufo-rail" aria-label="File Actions">
+        <button type="button" class="ufo-rail-btn" id="act-open" title="Open File(s)">
+          <i class="bi bi-plus-lg"></i>
+          <span>Open</span>
+        </button>
+        <button type="button" class="ufo-rail-btn" id="act-resave" title="Re-Save / Export Copy or Report" disabled>
+          <i class="bi bi-download"></i>
+          <span>Re-Save</span>
+        </button>
+        <button type="button" class="ufo-rail-btn" id="act-info" title="File Information & Telemetry" disabled>
+          <i class="bi bi-info-circle"></i>
+          <span>Information</span>
+        </button>
+        <button type="button" class="ufo-rail-btn" id="act-fullscreen" title="Toggle Full-Screen">
+          <i class="bi bi-fullscreen" id="icon-fullscreen"></i>
+          <span>Full-Screen</span>
+        </button>
+        <button type="button" class="ufo-rail-btn" id="act-theme" title="Toggle Dark / Light Mode">
+          <i class="bi bi-sun" id="icon-theme"></i>
+          <span id="label-theme">Light</span>
+        </button>
+        <button type="button" class="ufo-rail-btn disabled" id="act-edit" title="Edit (Coming Soon)" disabled>
+          <i class="bi bi-pencil"></i>
+          <span>Edit</span>
+          <small>(Coming Soon)</small>
+        </button>
+      </aside>
+
+      <!-- Slide-over Information Drawer -->
+      <aside class="ufo-info-drawer hidden" id="ufo-info-drawer" aria-label="File Information">
+        <div class="ufo-drawer-head">
+          <span><i class="bi bi-info-circle"></i> FILE TELEMETRY</span>
+          <button type="button" class="ufo-win-icon" id="btn-close-info" title="Close Inspector">
+            <i class="bi bi-x-lg"></i>
+          </button>
+        </div>
+        <div class="ufo-drawer-body" id="ufo-info-body"></div>
+      </aside>
+    </main>
+
+    <!-- Supported Formats Modal & Re-Save Modal -->
+    <div id="ufo-modal" class="ufo-modal hidden" role="dialog" aria-modal="true">
+      <div class="ufo-modal-card">
+        <div class="ufo-drawer-head">
+          <span id="ufo-modal-title">CATALOG</span>
+          <button type="button" class="ufo-win-icon" id="btn-close-modal"><i class="bi bi-x-lg"></i></button>
+        </div>
+        <div id="ufo-modal-body" class="ufo-modal-body"></div>
+      </div>
+    </div>
+
+    <!-- Hidden universal file input for Web & Mobile -->
+    <input type="file" id="ufo-file-input" multiple class="hidden" />
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
