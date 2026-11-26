@@ -1,0 +1,166 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*' # Triggers on v0.1, v0.1.0, v0.2, v1, v2, etc. (including when created via GitHub Releases UI)
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.resolve_tag.outputs.tag }}
+    steps:
+      - name: Resolve release tag
+        id: resolve_tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ensure GitHub Release exists
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.resolve_tag.outputs.tag }}
+          name: Universal File Opener ${{ steps.resolve_tag.outputs.tag }}
+          draft: false
+          prerelease: false
+
+  publish-desktop:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest # Produces .exe (NSIS) & .msi
+          - platform: ubuntu-latest  # Produces .AppImage & .deb
+          - platform: macos-latest   # Produces .dmg & .app
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Build and upload Tauri desktop bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ needs.create-release.outputs.tag_name }}
+          releaseName: Universal File Opener ${{ needs.create-release.outputs.tag_name }}
+          releaseDraft: false
+          prerelease: false
+
+  publish-android:
+    needs: create-release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust with Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK and build-tools
+        run: |
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;26.3.11579264"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> "$GITHUB_ENV"
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Initialize Android project if missing
+        run: |
+          if [ ! -d "src-tauri/gen/android" ]; then
+            cargo tauri android init --ci
+          fi
+
+      - name: Build Android APK
+        run: cargo tauri android build --apk --ci
+
+      - name: Sign APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          APKSIGNER="$ANDROID_HOME/build-tools/34.0.0/apksigner"
+          mkdir -p release-apks
+
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > release.keystore
+            KS_FILE="release.keystore"
+            KS_PASS="$ANDROID_KEYSTORE_PASSWORD"
+            KEY_ALIAS="$ANDROID_KEY_ALIAS"
+            KEY_PASS="$ANDROID_KEY_PASSWORD"
+          else
+            # Fallback self-signed key so the APK can be installed on Android without extra setup
+            keytool -genkeypair -v \
+              -keystore debug-fallback.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Universal File Opener,O=UFO,C=US"
+            KS_FILE="debug-fallback.keystore"
+            KS_PASS="android"
+            KEY_ALIAS="androiddebugkey"
+            KEY_PASS="android"
+          fi
+
+          for apk in $(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk"); do
+            base=$(basename "$apk" -unsigned.apk)
+            base=$(basename "$base" .apk)
+            out="release-apks/${base}.apk"
+            "$APKSIGNER" sign \
+              --ks "$KS_FILE" \
+              --ks-pass "pass:$KS_PASS" \
+              --ks-key-alias "$KEY_ALIAS" \
+              --key-pass "pass:$KEY_PASS" \
+              --out "$out" \
+              "$apk"
+          done
+
+      - name: Upload APK to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.create-release.outputs.tag_name }}
+          files: release-apks/*.apk
