@@ -119,6 +119,14 @@ function setupTauriEvents() {
       await openNativePath(p);
     }
   });
+  evt.listen("single-instance-files", async (event) => {
+    const paths = Array.isArray(event.payload) ? event.payload : [];
+    for (const p of paths) {
+      if (typeof p === "string" && p.trim()) {
+        await openNativePath(p);
+      }
+    }
+  });
 }
 
 function bindEvents() {
@@ -497,7 +505,7 @@ function renderTabs() {
     closeBtn.type = "button";
     closeBtn.className = "ufo-tab-close";
     closeBtn.title = "Close file";
-    closeBtn.innerHTML = `<i class="bi bi-x-circle"></i>`;
+    closeBtn.innerHTML = `<i class="bi bi-x-circle tab-close-outline"></i><i class="bi bi-x-circle-fill tab-close-fill"></i>`;
     closeBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       closeTab(tab.id);
@@ -562,6 +570,9 @@ function renderStage() {
       break;
     case "Vector2d":
       tab.cleanup = renderVector2dView(host, v);
+      break;
+    case "LayeredDesign":
+      tab.cleanup = renderLayeredDesignView(host, v);
       break;
     case "Mesh3d":
       tab.cleanup = mountMeshViewer(host, v, () => state.theme === "light");
@@ -798,6 +809,515 @@ function renderVector2dView(host, v) {
   stage.appendChild(hud);
   host.appendChild(stage);
   return () => URL.revokeObjectURL(url);
+}
+
+const SAFE_BLEND_MODES = new Set([
+  "normal", "multiply", "screen", "overlay", "darken", "lighten",
+  "color-dodge", "color-burn", "hard-light", "soft-light",
+  "difference", "exclusion", "hue", "saturation", "color", "luminosity",
+]);
+
+function renderLayeredDesignView(host, v) {
+  const pages = Array.isArray(v.pages) ? v.pages : [];
+  if (pages.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "ufo-media-stage";
+    empty.innerHTML = `<div class="ufo-empty-note">No pages or layers found in ${escapeHtml(v.format_label || "design")}.</div>`;
+    host.appendChild(empty);
+    return () => {};
+  }
+
+  let activeMode = pages.length > 1 && typeof v.active_page === "number" && pages[v.active_page]
+    ? v.active_page
+    : (pages.length > 1 ? "all" : 0);
+
+  const layerVis = pages.map((p) => (p.layers || []).map((l) => l.visible !== false));
+  const hasDrawables = pages.map((p) =>
+    (p.layers || []).some((l) => Boolean(l.image_data_url || l.svg_fragment))
+  );
+  const showComposite = pages.map((p, pi) => Boolean(p.composite_data_url) && !hasDrawables[pi]);
+
+  const split = document.createElement("div");
+  split.className = "ufo-stage-split";
+
+  const main = document.createElement("div");
+  main.className = "ufo-design-main ufo-img-wrap";
+  main.style.display = "flex";
+  main.style.alignItems = "center";
+  main.style.justifyContent = "center";
+
+  const canvas = document.createElement("div");
+  canvas.className = "ufo-design-canvas";
+  main.appendChild(canvas);
+
+  const pz = attachPanZoom(main, canvas);
+
+  const hud = document.createElement("div");
+  hud.className = "ufo-float-toolbar";
+  const statusPill = document.createElement("span");
+  statusPill.className = "ufo-tool-btn";
+  statusPill.style.cursor = "default";
+  hud.appendChild(statusPill);
+  const zoomBtns = [
+    ["in", `<i class="bi bi-zoom-in"></i>`, "Zoom in"],
+    ["out", `<i class="bi bi-zoom-out"></i>`, "Zoom out"],
+    ["reset", "FIT", "Reset pan & zoom"],
+  ];
+  for (const [z, label, title] of zoomBtns) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "ufo-tool-btn";
+    b.dataset.z = z;
+    b.title = title;
+    b.innerHTML = label;
+    hud.appendChild(b);
+  }
+  hud.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    if (b.dataset.z === "in") pz.zoomIn();
+    if (b.dataset.z === "out") pz.zoomOut();
+    if (b.dataset.z === "reset") pz.reset();
+  });
+  main.appendChild(hud);
+
+  const side = document.createElement("aside");
+  side.className = "ufo-side-panel";
+  split.appendChild(main);
+  split.appendChild(side);
+  host.appendChild(split);
+
+  const frameRefs = new Map();
+  const hlRefs = new Map();
+  const scaleRefs = new Map();
+  const rowRefs = new Map();
+
+  function setStatus(text) {
+    if (text) {
+      statusPill.textContent = text;
+      return;
+    }
+    const modeLabel = activeMode === "all"
+      ? `All Pages (${pages.length})`
+      : `${pages[activeMode]?.name || "Page"} · ${Math.round(pages[activeMode]?.width || 0)}×${Math.round(pages[activeMode]?.height || 0)}`;
+    statusPill.textContent = `${v.format_label || "Design"} · ${modeLabel}`;
+  }
+
+  function highlightLayer(pIdx, lIdx) {
+    const page = pages[pIdx];
+    const hl = hlRefs.get(pIdx);
+    const dispScale = scaleRefs.get(pIdx) || 1;
+    if (!page || !hl) return;
+    if (lIdx === null || lIdx === undefined) {
+      hl.style.display = "none";
+      rowRefs.forEach((el) => el.style.borderColor = "");
+      setStatus(null);
+      return;
+    }
+    const layer = page.layers?.[lIdx];
+    if (!layer) return;
+    const x = (Number(layer.x) || 0) * dispScale;
+    const y = (Number(layer.y) || 0) * dispScale;
+    const w = Math.max(10, (Number(layer.width) || 0) * dispScale);
+    const h = Math.max(10, (Number(layer.height) || 0) * dispScale);
+    hl.style.left = `${x}px`;
+    hl.style.top = `${y}px`;
+    hl.style.width = `${w}px`;
+    hl.style.height = `${h}px`;
+    hl.style.display = "block";
+    rowRefs.forEach((el, key) => {
+      el.style.borderColor = key === `${pIdx}:${lIdx}` ? "var(--ice)" : "";
+    });
+    setStatus(`${layer.name} · ${layer.kind} (${Math.round(layer.x || 0)}, ${Math.round(layer.y || 0)} · ${Math.round(layer.width || 0)}×${Math.round(layer.height || 0)})`);
+  }
+
+  function renderCanvas() {
+    canvas.innerHTML = "";
+    frameRefs.clear();
+    hlRefs.clear();
+    scaleRefs.clear();
+
+    const indices = activeMode === "all" ? pages.map((_, idx) => idx) : [activeMode];
+    const maxDim = activeMode === "all" ? (pages.length > 4 ? 340 : 460) : 820;
+
+    for (const pIdx of indices) {
+      const page = pages[pIdx];
+      if (!page) continue;
+      const pw = Math.max(1, Number(page.width) || 800);
+      const ph = Math.max(1, Number(page.height) || 600);
+      let dispScale = Math.min(1, maxDim / Math.max(pw, ph));
+      if (Math.max(pw, ph) < 260) {
+        dispScale = Math.min(3.5, Math.max(1, 360 / Math.max(pw, ph)));
+      }
+      scaleRefs.set(pIdx, dispScale);
+
+      const frame = document.createElement("div");
+      frame.className = "ufo-artboard-frame";
+      frame.style.width = `${Math.max(24, pw * dispScale)}px`;
+      frame.style.height = `${Math.max(24, ph * dispScale)}px`;
+      if (page.background) {
+        frame.style.background = page.background;
+      }
+
+      const titleTag = document.createElement("div");
+      titleTag.className = "ufo-artboard-title";
+      titleTag.textContent = `${page.name} (${Math.round(pw)}×${Math.round(ph)})`;
+      frame.appendChild(titleTag);
+
+      const stage = document.createElement("div");
+      stage.style.position = "absolute";
+      stage.style.left = "0";
+      stage.style.top = "0";
+      stage.style.width = `${pw}px`;
+      stage.style.height = `${ph}px`;
+      stage.style.transformOrigin = "top left";
+      stage.style.transform = `scale(${dispScale})`;
+
+      const layers = page.layers || [];
+      const topDownStack = /photoshop|openraster|krita/i.test(v.format_label || "");
+      if (showComposite[pIdx] && page.composite_data_url) {
+        const compImg = document.createElement("img");
+        compImg.src = page.composite_data_url;
+        compImg.alt = page.name;
+        compImg.draggable = false;
+        compImg.style.position = "absolute";
+        compImg.style.left = "0";
+        compImg.style.top = "0";
+        compImg.style.width = `${pw}px`;
+        compImg.style.height = `${ph}px`;
+        compImg.style.objectFit = "contain";
+        compImg.style.pointerEvents = "none";
+        stage.appendChild(compImg);
+      } else {
+        let drawnAny = false;
+        for (let li = 0; li < layers.length; li++) {
+          if (!layerVis[pIdx][li]) continue;
+          const layer = layers[li];
+          const opacity = Math.max(0, Math.min(1, Number(layer.opacity ?? 1)));
+          const blendKey = String(layer.blend_mode || "normal").toLowerCase().replace(/_/g, "-");
+          const blendCss = SAFE_BLEND_MODES.has(blendKey) ? blendKey : "normal";
+          const layerZ = String(topDownStack ? (layers.length - li) : (li + 1));
+
+          if (layer.image_data_url) {
+            drawnAny = true;
+            const lImg = document.createElement("img");
+            lImg.src = layer.image_data_url;
+            lImg.alt = layer.name;
+            lImg.draggable = false;
+            lImg.style.position = "absolute";
+            lImg.style.left = `${Number(layer.x) || 0}px`;
+            lImg.style.top = `${Number(layer.y) || 0}px`;
+            lImg.style.width = `${Math.max(1, Number(layer.width) || pw)}px`;
+            lImg.style.height = `${Math.max(1, Number(layer.height) || ph)}px`;
+            lImg.style.opacity = String(opacity);
+            lImg.style.mixBlendMode = blendCss;
+            lImg.style.zIndex = layerZ;
+            lImg.style.pointerEvents = "none";
+            stage.appendChild(lImg);
+          }
+          if (layer.svg_fragment) {
+            drawnAny = true;
+            const ns = "http://www.w3.org/2000/svg";
+            const svg = document.createElementNS(ns, "svg");
+            svg.setAttribute("viewBox", `0 0 ${pw} ${ph}`);
+            svg.setAttribute("width", String(pw));
+            svg.setAttribute("height", String(ph));
+            svg.style.position = "absolute";
+            svg.style.left = "0";
+            svg.style.top = "0";
+            svg.style.opacity = String(opacity);
+            svg.style.mixBlendMode = blendCss;
+            svg.style.zIndex = layerZ;
+            svg.style.overflow = "visible";
+            svg.style.pointerEvents = "none";
+            svg.innerHTML = layer.svg_fragment;
+            stage.appendChild(svg);
+          }
+          if (!layer.image_data_url && !layer.svg_fragment && Number(layer.width) > 0 && Number(layer.height) > 0) {
+            const box = document.createElement("div");
+            box.style.position = "absolute";
+            box.style.left = `${Number(layer.x) || 0}px`;
+            box.style.top = `${Number(layer.y) || 0}px`;
+            box.style.width = `${Number(layer.width)}px`;
+            box.style.height = `${Number(layer.height)}px`;
+            box.style.border = "1px dashed rgba(234, 255, 255, 0.25)";
+            box.style.pointerEvents = "none";
+            stage.appendChild(box);
+          }
+        }
+        if (!drawnAny && page.composite_data_url && layerVis[pIdx].some(Boolean)) {
+          const compFallback = document.createElement("img");
+          compFallback.src = page.composite_data_url;
+          compFallback.alt = page.name;
+          compFallback.draggable = false;
+          compFallback.style.position = "absolute";
+          compFallback.style.left = "0";
+          compFallback.style.top = "0";
+          compFallback.style.width = `${pw}px`;
+          compFallback.style.height = `${ph}px`;
+          compFallback.style.objectFit = "contain";
+          compFallback.style.pointerEvents = "none";
+          stage.appendChild(compFallback);
+        }
+      }
+
+      frame.appendChild(stage);
+
+      const hl = document.createElement("div");
+      hl.className = "ufo-hover-highlight";
+      frame.appendChild(hl);
+      hlRefs.set(pIdx, hl);
+      frameRefs.set(pIdx, frame);
+
+      frame.addEventListener("pointermove", (e) => {
+        const rect = frame.getBoundingClientRect();
+        const scaleX = rect.width > 0 ? rect.width / pw : dispScale;
+        const scaleY = rect.height > 0 ? rect.height / ph : dispScale;
+        const px = (e.clientX - rect.left) / scaleX;
+        const py = (e.clientY - rect.top) / scaleY;
+        let hit = null;
+        for (let li = layers.length - 1; li >= 0; li--) {
+          if (!layerVis[pIdx][li]) continue;
+          const l = layers[li];
+          const lx = Number(l.x) || 0;
+          const ly = Number(l.y) || 0;
+          const lw = Number(l.width) || 0;
+          const lh = Number(l.height) || 0;
+          if (lw > 0 && lh > 0 && px >= lx && px <= lx + lw && py >= ly && py <= ly + lh) {
+            hit = li;
+            break;
+          }
+        }
+        frame.classList.add("is-hovered");
+        highlightLayer(pIdx, hit);
+      });
+      frame.addEventListener("pointerleave", () => {
+        frame.classList.remove("is-hovered");
+        highlightLayer(pIdx, null);
+      });
+
+      canvas.appendChild(frame);
+    }
+    setStatus(null);
+  }
+
+  function renderSidePanel() {
+    side.innerHTML = "";
+    rowRefs.clear();
+
+    // 1. Pages Section
+    const pageSec = document.createElement("div");
+    pageSec.className = "ufo-side-section";
+    const pageHead = document.createElement("div");
+    pageHead.className = "ufo-side-head";
+    pageHead.innerHTML = `<span><i class="bi bi-journals"></i> Pages (${pages.length})</span>`;
+    pageSec.appendChild(pageHead);
+
+    const pageList = document.createElement("div");
+    pageList.className = "ufo-page-list";
+
+    if (pages.length > 1) {
+      const allBtn = document.createElement("button");
+      allBtn.type = "button";
+      allBtn.className = `ufo-page-btn ${activeMode === "all" ? "active" : ""}`;
+      allBtn.innerHTML = `<span>ALL PAGES</span><span>${pages.length} artboards</span>`;
+      allBtn.addEventListener("mouseenter", () => {
+        frameRefs.forEach((f) => f.classList.add("is-hovered"));
+      });
+      allBtn.addEventListener("mouseleave", () => {
+        frameRefs.forEach((f) => f.classList.remove("is-hovered"));
+      });
+      allBtn.addEventListener("click", () => {
+        activeMode = "all";
+        pz.reset();
+        renderCanvas();
+        renderSidePanel();
+      });
+      pageList.appendChild(allBtn);
+    }
+
+    pages.forEach((p, pi) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `ufo-page-btn ${activeMode === pi ? "active" : ""}`;
+      const prefix = pages.length === 1 ? "Entire Page · " : `${pi + 1}. `;
+      btn.innerHTML = `<span>${escapeHtml(prefix + p.name)}</span><span>${Math.round(p.width)}×${Math.round(p.height)}</span>`;
+      btn.addEventListener("mouseenter", () => {
+        const f = frameRefs.get(pi);
+        if (f) f.classList.add("is-hovered");
+        setStatus(`Page: ${p.name} · ${(p.layers || []).length} layers`);
+      });
+      btn.addEventListener("mouseleave", () => {
+        const f = frameRefs.get(pi);
+        if (f) f.classList.remove("is-hovered");
+        setStatus(null);
+      });
+      btn.addEventListener("click", () => {
+        activeMode = pi;
+        pz.reset();
+        renderCanvas();
+        renderSidePanel();
+      });
+      pageList.appendChild(btn);
+    });
+    pageSec.appendChild(pageList);
+    side.appendChild(pageSec);
+
+    // 2. Layers Section
+    const layerIndices = activeMode === "all" ? pages.map((_, idx) => idx) : [activeMode];
+    const totalLayers = layerIndices.reduce((acc, pi) => acc + (pages[pi]?.layers?.length || 0), 0);
+
+    const layerSec = document.createElement("div");
+    layerSec.className = "ufo-side-section";
+    layerSec.style.borderBottom = "none";
+
+    const layerHead = document.createElement("div");
+    layerHead.className = "ufo-side-head";
+    const headTitle = document.createElement("span");
+    headTitle.innerHTML = `<i class="bi bi-layers"></i> Layers (${totalLayers})`;
+    layerHead.appendChild(headTitle);
+
+    const actions = document.createElement("div");
+    actions.className = "ufo-side-actions";
+
+    const btnAll = document.createElement("button");
+    btnAll.type = "button";
+    btnAll.className = "ufo-mini-btn";
+    btnAll.textContent = "All";
+    btnAll.title = "Show all layers";
+    btnAll.addEventListener("click", () => {
+      for (const pi of layerIndices) {
+        layerVis[pi] = layerVis[pi].map(() => true);
+        if (hasDrawables[pi]) showComposite[pi] = false;
+      }
+      renderCanvas();
+      renderSidePanel();
+    });
+    actions.appendChild(btnAll);
+
+    const btnNone = document.createElement("button");
+    btnNone.type = "button";
+    btnNone.className = "ufo-mini-btn";
+    btnNone.textContent = "None";
+    btnNone.title = "Hide all layers";
+    btnNone.addEventListener("click", () => {
+      for (const pi of layerIndices) {
+        layerVis[pi] = layerVis[pi].map(() => false);
+        showComposite[pi] = false;
+      }
+      renderCanvas();
+      renderSidePanel();
+    });
+    actions.appendChild(btnNone);
+
+    const anyComposite = layerIndices.some((pi) => Boolean(pages[pi]?.composite_data_url));
+    if (anyComposite) {
+      const compActive = layerIndices.every((pi) => !pages[pi]?.composite_data_url || showComposite[pi]);
+      const btnComp = document.createElement("button");
+      btnComp.type = "button";
+      btnComp.className = `ufo-mini-btn ${compActive ? "active" : ""}`;
+      btnComp.textContent = "Merged";
+      btnComp.title = "Toggle flattened composite preview vs live visible layers";
+      btnComp.addEventListener("click", () => {
+        const next = !compActive;
+        for (const pi of layerIndices) {
+          if (pages[pi]?.composite_data_url) showComposite[pi] = next;
+        }
+        renderCanvas();
+        renderSidePanel();
+      });
+      actions.appendChild(btnComp);
+    }
+
+    layerHead.appendChild(actions);
+    layerSec.appendChild(layerHead);
+
+    const layerList = document.createElement("div");
+    layerList.className = "ufo-layer-list";
+
+    for (const pi of layerIndices) {
+      const page = pages[pi];
+      const layers = page?.layers || [];
+      if (activeMode === "all" && pages.length > 1) {
+        const sub = document.createElement("div");
+        sub.className = "ufo-layer-sub";
+        sub.style.padding = "4px 6px 2px";
+        sub.textContent = `— ${page.name} (${layers.length}) —`;
+        layerList.appendChild(sub);
+      }
+      layers.forEach((layer, li) => {
+        const isVis = layerVis[pi][li];
+        const row = document.createElement("div");
+        row.className = `ufo-layer-row ${isVis ? "" : "is-hidden"}`;
+        row.style.paddingLeft = `${6 + Math.min(5, Number(layer.depth) || 0) * 12}px`;
+
+        const eyeBtn = document.createElement("button");
+        eyeBtn.type = "button";
+        eyeBtn.className = `ufo-eye-btn ${isVis ? "" : "is-off"}`;
+        eyeBtn.title = isVis ? "Hide layer" : "Show layer";
+        eyeBtn.innerHTML = `<i class="bi ${isVis ? "bi-eye" : "bi-eye-slash"}"></i>`;
+        eyeBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const next = !layerVis[pi][li];
+          layerVis[pi][li] = next;
+          const kind = String(layer.kind || "");
+          if (kind === "Group" || kind === "Frame" || kind === "Stack") {
+            const baseDepth = Number(layer.depth) || 0;
+            for (let ci = li + 1; ci < layers.length; ci++) {
+              if ((Number(layers[ci].depth) || 0) <= baseDepth) break;
+              layerVis[pi][ci] = next;
+            }
+          }
+          if (hasDrawables[pi]) {
+            showComposite[pi] = false;
+          }
+          renderCanvas();
+          renderSidePanel();
+        });
+
+        const meta = document.createElement("div");
+        meta.className = "ufo-layer-meta";
+        const nm = document.createElement("div");
+        nm.className = "ufo-layer-name";
+        nm.textContent = layer.name || `Layer ${li + 1}`;
+        const sub = document.createElement("div");
+        sub.className = "ufo-layer-sub";
+        sub.textContent = `${layer.kind || "Layer"} · ${Math.round(layer.width || 0)}×${Math.round(layer.height || 0)}`;
+        meta.appendChild(nm);
+        meta.appendChild(sub);
+
+        row.appendChild(eyeBtn);
+        row.appendChild(meta);
+
+        row.addEventListener("mouseenter", () => highlightLayer(pi, li));
+        row.addEventListener("mouseleave", () => highlightLayer(pi, null));
+        row.addEventListener("click", () => eyeBtn.click());
+
+        rowRefs.set(`${pi}:${li}`, row);
+        layerList.appendChild(row);
+      });
+    }
+
+    if (v.note) {
+      const noteEl = document.createElement("div");
+      noteEl.className = "ufo-layer-sub";
+      noteEl.style.padding = "8px 6px";
+      noteEl.textContent = v.note;
+      layerList.appendChild(noteEl);
+    }
+
+    layerSec.appendChild(layerList);
+    side.appendChild(layerSec);
+  }
+
+  renderCanvas();
+  renderSidePanel();
+  return () => {
+    frameRefs.clear();
+    hlRefs.clear();
+    scaleRefs.clear();
+    rowRefs.clear();
+  };
 }
 
 function renderTextView(host, tab, v) {

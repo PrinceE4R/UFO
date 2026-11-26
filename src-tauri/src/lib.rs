@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use memmap2::Mmap;
 use serde::Serialize;
-use tauri::{http, ipc::Response, Manager, State, Window};
+use tauri::{http, ipc::Response, Emitter, Manager, State, Window};
 
 enum FileBacking {
     Mapped { _file: File, mmap: Mmap },
@@ -478,7 +478,32 @@ pub fn run() {
     }
     let proto_state = Arc::clone(&state);
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            let new_files: Vec<String> = argv
+                .into_iter()
+                .skip(1)
+                .filter(|a| Path::new(a).exists())
+                .collect();
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+            if !new_files.is_empty() {
+                if let Some(st) = app.try_state::<Arc<AppState>>() {
+                    if let Ok(mut pending) = st.launch_paths.lock() {
+                        pending.extend(new_files.iter().cloned());
+                    }
+                }
+                let _ = app.emit("single-instance-files", new_files);
+            }
+        }));
+    }
+
+    builder
         .manage(state)
         .register_asynchronous_uri_scheme_protocol("ufo", move |_ctx, request, responder| {
             let st = Arc::clone(&proto_state);

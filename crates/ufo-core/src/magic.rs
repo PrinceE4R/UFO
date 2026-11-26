@@ -246,7 +246,25 @@ fn check_extension_mismatch(
         "webp" => detected_id != "webp",
         "gif" => detected_id != "gif",
         "pdf" => detected_id != "pdf",
-        "zip" => !matches!(detected_id, "zip" | "docx" | "xlsx" | "pptx" | "apk" | "ipa" | "jar" | "epub" | "3mf" | "fcstd"),
+        "zip" => !matches!(
+            detected_id,
+            "zip"
+                | "docx"
+                | "xlsx"
+                | "pptx"
+                | "apk"
+                | "ipa"
+                | "jar"
+                | "epub"
+                | "3mf"
+                | "fcstd"
+                | "fig"
+                | "figcraft"
+                | "pcraft"
+                | "photocraft"
+                | "ora"
+                | "kra"
+        ),
         "c" | "cpp" | "rs" | "py" | "js" | "json" | "xml" | "html" | "md" | "txt" => {
             matches!(
                 detected_cat,
@@ -478,8 +496,8 @@ fn detect_by_magic_and_structure(
     if bytes.starts_with(b"bplist00") || bytes.starts_with(b"bplist01") {
         return Some(mm("plist", "Apple Binary Property List", FormatCategory::NetworkingSecurity, "application/x-plist", "Binary plist 'bplist00' header"));
     }
-    if bytes.starts_with(b"fig-kiwi") {
-        return Some(mm("fig", "Figma Design Document", FormatCategory::VectorDesign, "application/octet-stream", "Figma 'fig-kiwi' binary header"));
+    if bytes.starts_with(b"fig-kiwi") || bytes.starts_with(b"fig-jam.") || bytes.starts_with(b"fig-deck") {
+        return Some(mm("fig", "Figma Design Document", FormatCategory::VectorDesign, "application/octet-stream", "Figma binary 'fig-kiwi' / 'fig-jam.' header"));
     }
     if bytes.starts_with(b"#FIG") {
         return Some(mm("fig", "Xfig Vector Drawing", FormatCategory::VectorDesign, "image/x-xfig", "Xfig '#FIG' header"));
@@ -635,6 +653,9 @@ fn detect_by_magic_and_structure(
         if ext == Some("blend") {
             return Some(mm("blend", "Blender Project File (Gzip)", FormatCategory::Model3D, "application/x-blender", "Gzip-compressed Blender .blend container"));
         }
+        if ext == Some("vectorcraft") {
+            return Some(mm("vectorcraft", "ArtCraft VectorCraft Document (Gzip)", FormatCategory::VectorDesign, "application/gzip", "Gzip-compressed VectorCraft container"));
+        }
         let id = match ext {
             Some("svgz") => "svgz",
             Some("tgz" | "tar.gz" | "crate" | "unitypackage") => "tar.gz",
@@ -730,6 +751,12 @@ fn detect_by_magic_and_structure(
             return Some(mm("kicad_sch", "KiCad Schematic", FormatCategory::ElectronicsPcb, "text/plain", "KiCad S-expression (kicad_sch)"));
         }
         if trimmed.starts_with("{") || trimmed.starts_with("[") {
+            if ext == Some("vectorcraft") || (trimmed.contains("\"format\"") && (trimmed.contains("\"vectorcraft\"") || trimmed.contains("\"drawcraft\""))) {
+                return Some(mm("vectorcraft", "ArtCraft VectorCraft Document", FormatCategory::VectorDesign, "application/json", "VectorCraft JSON structure"));
+            }
+            if ext == Some("figcraft") || (trimmed.contains("\"format\"") && trimmed.contains("\"figcraft\"")) {
+                return Some(mm("figcraft", "ArtCraft FigCraft Design", FormatCategory::VectorDesign, "application/json", "FigCraft JSON structure"));
+            }
             if trimmed.contains("\"nbformat\"") && trimmed.contains("\"cells\"") {
                 return Some(mm("ipynb", "Jupyter Notebook", FormatCategory::SourceCode, "application/x-ipynb+json", "JSON notebook structure (nbformat/cells)"));
             }
@@ -835,6 +862,18 @@ fn inspect_zip_container(bytes: &[u8], ext: Option<&str>) -> MagicMatch {
     }
     if names.contains("canvas.fig") {
         return mm("fig", "Figma Packaged Design (.fig)", FormatCategory::VectorDesign, "application/zip", "ZIP container with canvas.fig");
+    }
+    if names.contains("stack.xml") || ext == Some("ora") {
+        return mm("ora", "OpenRaster Layered Image (.ora)", FormatCategory::RasterImage, "image/openraster", "ZIP OpenRaster container with stack.xml");
+    }
+    if names.contains("maindoc.xml") || ext == Some("kra") {
+        return mm("kra", "Krita Layered Document (.kra)", FormatCategory::RasterImage, "application/x-krita", "ZIP Krita container with maindoc.xml");
+    }
+    if names.contains("manifest.json") && (ext == Some("pcraft") || ext == Some("photocraft") || names.iter().any(|n| n.starts_with("tiles/") || n.starts_with("composite/"))) {
+        return mm("pcraft", "ArtCraft PhotoCraft Project", FormatCategory::RasterImage, "application/zip", "ZIP container with PhotoCraft manifest.json");
+    }
+    if names.contains("document.json") && (ext == Some("figcraft") || names.iter().any(|n| n.starts_with("images/") || n == "thumbnail.png")) {
+        return mm("figcraft", "ArtCraft FigCraft Design", FormatCategory::VectorDesign, "application/zip", "ZIP container with FigCraft document.json");
     }
     if names.iter().any(|n| n.starts_with("Index/") && n.ends_with(".iwa")) || ext == Some("key") {
         return mm("keynote", "Apple Keynote / iWork Package", FormatCategory::OfficePresentation, "application/zip", "ZIP iWork IWA container");

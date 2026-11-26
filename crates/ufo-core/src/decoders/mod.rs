@@ -1,6 +1,8 @@
+pub mod anim;
 pub mod archive;
 pub mod blend;
 pub mod data;
+pub mod design;
 pub mod document;
 pub mod font;
 pub mod hex_bin;

@@ -1,4 +1,4 @@
-// High-speed WebGL2 / WebGL1 Mesh, STEP CAD, Textured GLB, and Gaussian Splatting Viewport
+// High-speed WebGL2 / WebGL1 Mesh, Solidcore CAD, Textured GLB/Blend, Skeletal Animation, and Splatting Viewport
 
 function decodeB64F32(b64) {
   if (!b64) return new Float32Array(0);
@@ -9,15 +9,108 @@ function decodeB64F32(b64) {
   return new Float32Array(bytes.buffer, 0, Math.floor(len / 4));
 }
 
+function escHtml(s) {
+  return String(s ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function quatToMat4(q, p, s) {
+  const [x, y, z, w] = q;
+  const [sx, sy, sz] = s;
+  const x2 = x + x, y2 = y + y, z2 = z + z;
+  const xx = x * x2, xy = x * y2, xz = x * z2;
+  const yy = y * y2, yz = y * z2, zz = z * z2;
+  const wx = w * x2, wy = w * y2, wz = w * z2;
+  return [
+    (1 - (yy + zz)) * sx, (xy + wz) * sx, (xz - wy) * sx, 0,
+    (xy - wz) * sy, (1 - (xx + zz)) * sy, (yz + wx) * sy, 0,
+    (xz + wy) * sz, (yz - wx) * sz, (1 - (xx + yy)) * sz, 0,
+    p[0], p[1], p[2], 1,
+  ];
+}
+
+function mulMat4F64(a, b) {
+  const o = new Array(16);
+  for (let c = 0; c < 4; c++) {
+    for (let r = 0; r < 4; r++) {
+      o[c * 4 + r] =
+        a[r] * b[c * 4] +
+        a[4 + r] * b[c * 4 + 1] +
+        a[8 + r] * b[c * 4 + 2] +
+        a[12 + r] * b[c * 4 + 3];
+    }
+  }
+  return o;
+}
+
+function sampleVec3(times, arr, t, def) {
+  if (!arr || !arr.length) return def;
+  if (arr.length === 1 || !times || times.length <= 1 || t <= times[0]) return arr[0];
+  const last = Math.min(times.length, arr.length) - 1;
+  if (t >= times[last]) return arr[last];
+  let lo = 0, hi = last;
+  while (lo + 1 < hi) {
+    const mid = (lo + hi) >> 1;
+    if (times[mid] <= t) lo = mid; else hi = mid;
+  }
+  const span = Math.max(times[hi] - times[lo], 1e-6);
+  const a = Math.max(0, Math.min(1, (t - times[lo]) / span));
+  return [
+    arr[lo][0] + (arr[hi][0] - arr[lo][0]) * a,
+    arr[lo][1] + (arr[hi][1] - arr[lo][1]) * a,
+    arr[lo][2] + (arr[hi][2] - arr[lo][2]) * a,
+  ];
+}
+
+function sampleQuat(times, arr, t, def) {
+  if (!arr || !arr.length) return def;
+  if (arr.length === 1 || !times || times.length <= 1 || t <= times[0]) return arr[0];
+  const last = Math.min(times.length, arr.length) - 1;
+  if (t >= times[last]) return arr[last];
+  let lo = 0, hi = last;
+  while (lo + 1 < hi) {
+    const mid = (lo + hi) >> 1;
+    if (times[mid] <= t) lo = mid; else hi = mid;
+  }
+  const span = Math.max(times[hi] - times[lo], 1e-6);
+  const a = Math.max(0, Math.min(1, (t - times[lo]) / span));
+  const q0 = arr[lo];
+  let q1 = arr[hi];
+  const dot = q0[0] * q1[0] + q0[1] * q1[1] + q0[2] * q1[2] + q0[3] * q1[3];
+  if (dot < 0) q1 = [-q1[0], -q1[1], -q1[2], -q1[3]];
+  const rx = q0[0] + (q1[0] - q0[0]) * a;
+  const ry = q0[1] + (q1[1] - q0[1]) * a;
+  const rz = q0[2] + (q1[2] - q0[2]) * a;
+  const rw = q0[3] + (q1[3] - q0[3]) * a;
+  const len = Math.hypot(rx, ry, rz, rw) || 1;
+  return [rx / len, ry / len, rz / len, rw / len];
+}
+
 export function mountMeshViewer(container, meshData, getIsLight) {
   container.innerHTML = "";
-  const wrap = document.createElement("div");
-  wrap.className = "ufo-media-stage";
-  wrap.style.padding = "0";
+  const layers = Array.isArray(meshData.layers) ? meshData.layers : [];
+  const materials = Array.isArray(meshData.materials) ? meshData.materials : [];
+  const skel = meshData.skeleton || null;
+  const hasSidePanel = layers.length > 0 || materials.length > 0 || !!skel;
+
+  const shell = document.createElement("div");
+  shell.className = hasSidePanel ? "ufo-stage-split" : "ufo-media-stage";
+  if (!hasSidePanel) shell.style.padding = "0";
+
+  const mainPane = document.createElement("div");
+  mainPane.className = "ufo-design-main";
+  if (!hasSidePanel) {
+    mainPane.style.width = "100%";
+    mainPane.style.height = "100%";
+  }
 
   const canvas = document.createElement("canvas");
   canvas.className = "ufo-3d-canvas";
-  wrap.appendChild(canvas);
+  mainPane.appendChild(canvas);
+  shell.appendChild(mainPane);
 
   const normPosRaw = decodeB64F32(meshData.positions_b64);
   const normNrm = decodeB64F32(meshData.normals_b64);
@@ -31,32 +124,30 @@ export function mountMeshViewer(container, meshData, getIsLight) {
   const hasWire = wireRaw.length >= 6;
   const hasPoints = ptPosRaw.length >= 3;
   const hasTex = Array.isArray(meshData.textures) && meshData.textures.some(Boolean);
+  const hasSkel = !!(skel && Array.isArray(skel.bones) && skel.bones.length > 0);
+  const clips = hasSkel && Array.isArray(skel.clips) ? skel.clips : [];
 
   let showSolid = hasSolid;
-  let showWire = !hasSolid && !hasPoints ? hasWire : (hasWire && !hasTex);
+  let showWire = !hasSolid && !hasPoints && !hasSkel ? hasWire : (hasWire && !hasTex);
   let showPoints = hasPoints;
   let showTextures = hasTex;
+  let showBones = hasSkel;
+  let showGrid = hasSkel && !hasSolid;
   let autoSpin = false;
-  let ptSize = meshData.is_gaussian_splat ? 6.0 : 3.5;
+  let ptSize = meshData.is_gaussian_splat ? 6.0 : (hasSkel && !hasSolid ? 6.5 : 3.5);
 
-  const hud = document.createElement("div");
-  hud.className = "ufo-float-toolbar";
-  const stats = hasPoints
-    ? `${meshData.point_count.toLocaleString()} ${meshData.is_gaussian_splat ? "SPLATS" : "PTS"}`
-    : `${meshData.triangle_count.toLocaleString()} TRIS · ${meshData.edge_count.toLocaleString()} EDGES`;
+  let animClipIdx = 0;
+  let animPlaying = clips.length > 0;
+  let animTime = 0;
+  let animSpeed = 1.0;
 
-  hud.innerHTML = `
-    <span class="ufo-tool-btn" style="cursor:default">${stats}</span>
-    ${hasSolid ? `<button type="button" class="ufo-tool-btn ${showSolid ? "active" : ""}" data-act="solid">SURFACE</button>` : ""}
-    ${hasTex ? `<button type="button" class="ufo-tool-btn ${showTextures ? "active" : ""}" data-act="tex">TEX</button>` : ""}
-    ${(hasWire || hasSolid) ? `<button type="button" class="ufo-tool-btn ${showWire ? "active" : ""}" data-act="wire">WIRE</button>` : ""}
-    ${hasPoints ? `<button type="button" class="ufo-tool-btn ${showPoints ? "active" : ""}" data-act="pts">POINTS</button>
-      <label class="ufo-tool-btn" style="display:inline-flex;align-items:center;gap:5px">SZ <input type="range" min="1" max="16" step="0.5" value="${ptSize}" data-act="ptsize" style="width:54px;accent-color:currentColor"></label>` : ""}
-    <button type="button" class="ufo-tool-btn" data-act="spin">SPIN</button>
-    <button type="button" class="ufo-tool-btn" data-act="reset">RESET</button>
-  `;
-  wrap.appendChild(hud);
-  container.appendChild(wrap);
+  // Map each batch index to owning layer index + visibility array
+  const layerVisible = layers.map((l) => l.visible !== false);
+  const batchToLayer = new Map();
+  layers.forEach((l, li) => {
+    for (const bi of (l.batch_indices || [])) batchToLayer.set(bi, li);
+  });
+  let hoveredLayerIdx = -1;
 
   // Center and normalize bounding box
   const bmin = meshData.bounds_min || [-1, -1, -1];
@@ -108,6 +199,181 @@ export function mountMeshViewer(container, meshData, getIsLight) {
     ptPos[i + 2] = (ptPosRaw[i + 2] - cz) * scale;
   }
 
+  // Build isometric ground grid lines when inspecting skeletal animations
+  const gridLines = [];
+  if (hasSkel) {
+    const gy = Math.max(-1.05, (bmin[1] - cy) * scale);
+    const step = 0.25;
+    for (let k = -4; k <= 4; k++) {
+      const p = k * step;
+      gridLines.push(-1, gy, p, 1, gy, p, p, gy, -1, p, gy, 1);
+    }
+  }
+  const gridArr = new Float32Array(gridLines);
+
+  // Build HUD controls
+  const hud = document.createElement("div");
+  hud.className = "ufo-float-toolbar";
+  const stats = hasSkel && !hasSolid
+    ? `${skel.bones.length} BONES · ${clips.length} CLIPS`
+    : hasPoints
+      ? `${meshData.point_count.toLocaleString()} ${meshData.is_gaussian_splat ? "SPLATS" : "PTS"}`
+      : `${meshData.triangle_count.toLocaleString()} TRIS · ${meshData.edge_count.toLocaleString()} EDGES`;
+
+  let clipSelectHtml = "";
+  if (clips.length > 0) {
+    const opts = clips.map((c, i) => `<option value="${i}">${escHtml(c.name)} (${c.duration_secs.toFixed(2)}s)</option>`).join("");
+    clipSelectHtml = `
+      <button type="button" class="ufo-tool-btn active" data-act="play" title="Play / Pause Loop"><i class="bi bi-pause-fill"></i> LOOP</button>
+      <select class="ufo-tool-btn" data-act="clip" style="max-width:150px">${opts}</select>
+      <button type="button" class="ufo-tool-btn" data-act="speed">1x</button>
+      <input type="range" class="ufo-tool-btn" min="0" max="1" step="0.005" value="0" data-act="scrub" style="width:90px;padding:0;accent-color:currentColor" title="Animation Timeline">
+      <span class="ufo-tool-btn" data-act="timecode" style="cursor:default">0.00s</span>
+    `;
+  }
+
+  hud.innerHTML = `
+    <span class="ufo-tool-btn" style="cursor:default">${stats}</span>
+    ${hasSolid ? `<button type="button" class="ufo-tool-btn ${showSolid ? "active" : ""}" data-act="solid">SURFACE</button>` : ""}
+    ${hasTex ? `<button type="button" class="ufo-tool-btn ${showTextures ? "active" : ""}" data-act="tex">TEX</button>` : ""}
+    ${(hasWire || hasSolid) ? `<button type="button" class="ufo-tool-btn ${showWire ? "active" : ""}" data-act="wire">WIRE</button>` : ""}
+    ${hasSkel ? `<button type="button" class="ufo-tool-btn ${showBones ? "active" : ""}" data-act="bones">BONES</button>` : ""}
+    ${hasSkel ? `<button type="button" class="ufo-tool-btn ${showGrid ? "active" : ""}" data-act="grid">GRID</button>` : ""}
+    ${hasPoints ? `<button type="button" class="ufo-tool-btn ${showPoints ? "active" : ""}" data-act="pts">POINTS</button>` : ""}
+    ${(hasPoints || hasSkel) ? `<label class="ufo-tool-btn" style="display:inline-flex;align-items:center;gap:5px">SZ <input type="range" min="1" max="16" step="0.5" value="${ptSize}" data-act="ptsize" style="width:52px;accent-color:currentColor"></label>` : ""}
+    ${clipSelectHtml}
+    <button type="button" class="ufo-tool-btn" data-act="spin">SPIN</button>
+    <button type="button" class="ufo-tool-btn" data-act="reset">RESET</button>
+  `;
+  mainPane.appendChild(hud);
+
+  // Build Side Panel for 3D Layers, Materials/Textures, and Skeleton Hierarchy
+  if (hasSidePanel) {
+    const side = document.createElement("aside");
+    side.className = "ufo-side-panel";
+
+    if (layers.length > 0) {
+      const sec = document.createElement("div");
+      sec.className = "ufo-side-section";
+      sec.innerHTML = `
+        <div class="ufo-side-head">
+          <span><i class="bi bi-layers"></i> OBJECT LAYERS (${layers.length})</span>
+          <div class="ufo-side-actions">
+            <button type="button" class="ufo-mini-btn" data-lall="show" title="Show All Layers"><i class="bi bi-eye"></i></button>
+            <button type="button" class="ufo-mini-btn" data-lall="hide" title="Hide All Layers"><i class="bi bi-eye-slash"></i></button>
+          </div>
+        </div>
+      `;
+      const list = document.createElement("div");
+      list.className = "ufo-layer-list";
+      const renderLayerRows = () => {
+        list.innerHTML = "";
+        layers.forEach((l, idx) => {
+          const vis = layerVisible[idx];
+          const row = document.createElement("div");
+          row.className = `ufo-layer-row${vis ? "" : " is-hidden"}`;
+          row.innerHTML = `
+            <button type="button" class="ufo-eye-btn${vis ? "" : " is-off"}" title="${vis ? "Hide Layer" : "Show Layer"}">
+              <i class="bi ${vis ? "bi-eye" : "bi-eye-slash"}"></i>
+            </button>
+            <div class="ufo-layer-meta">
+              <span class="ufo-layer-name">${escHtml(l.name)}</span>
+              <span class="ufo-layer-sub">${escHtml(l.kind)} · ${l.triangle_count.toLocaleString()} tris</span>
+            </div>
+          `;
+          row.querySelector(".ufo-eye-btn").addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            layerVisible[idx] = !layerVisible[idx];
+            renderLayerRows();
+          });
+          row.addEventListener("mouseenter", () => { hoveredLayerIdx = idx; });
+          row.addEventListener("mouseleave", () => { hoveredLayerIdx = -1; });
+          list.appendChild(row);
+        });
+      };
+      sec.querySelector("[data-lall='show']").addEventListener("click", () => {
+        for (let i = 0; i < layerVisible.length; i++) layerVisible[i] = true;
+        renderLayerRows();
+      });
+      sec.querySelector("[data-lall='hide']").addEventListener("click", () => {
+        for (let i = 0; i < layerVisible.length; i++) layerVisible[i] = false;
+        renderLayerRows();
+      });
+      renderLayerRows();
+      sec.appendChild(list);
+      side.appendChild(sec);
+    }
+
+    if (materials.length > 0 || hasTex) {
+      const mSec = document.createElement("div");
+      mSec.className = "ufo-side-section";
+      mSec.innerHTML = `<div class="ufo-side-head"><span><i class="bi bi-palette"></i> MATERIALS & TEXTURES</span></div>`;
+      const mList = document.createElement("div");
+      mList.className = "ufo-layer-list";
+      materials.slice(0, 40).forEach((m) => {
+        const c = m.base_color || [0.8, 0.85, 0.9, 1.0];
+        const css = `rgba(${Math.round(c[0] * 255)}, ${Math.round(c[1] * 255)}, ${Math.round(c[2] * 255)}, ${c[3] ?? 1})`;
+        const r = document.createElement("div");
+        r.className = "ufo-mat-row";
+        r.innerHTML = `
+          <span class="ufo-swatch" style="background:${css}"></span>
+          <div class="ufo-layer-meta">
+            <span class="ufo-layer-name">${escHtml(m.name)}</span>
+            <span class="ufo-layer-sub">M:${(m.metallic ?? 0).toFixed(2)} R:${(m.roughness ?? 0.5).toFixed(2)}${m.texture_name ? ` · ${escHtml(m.texture_name)}` : ""}</span>
+          </div>
+        `;
+        mList.appendChild(r);
+      });
+      if (hasTex) {
+        const texWrap = document.createElement("div");
+        texWrap.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;padding:6px;";
+        meshData.textures.filter(Boolean).slice(0, 12).forEach((url, ti) => {
+          const im = document.createElement("img");
+          im.src = url;
+          im.title = `Texture #${ti}`;
+          im.style.cssText = "width:48px;height:48px;object-fit:cover;border:1px solid var(--border);border-radius:4px;";
+          texWrap.appendChild(im);
+        });
+        mList.appendChild(texWrap);
+      }
+      mSec.appendChild(mList);
+      side.appendChild(mSec);
+    }
+
+    if (hasSkel) {
+      const sSec = document.createElement("div");
+      sSec.className = "ufo-side-section";
+      sSec.innerHTML = `
+        <div class="ufo-side-head">
+          <span><i class="bi bi-diagram-3"></i> SKELETON (${skel.bones.length} BONES)</span>
+        </div>
+        <div style="padding:6px 10px;font-family:var(--mono);font-size:10px;color:var(--ice-dim);border-bottom:1px solid var(--border)">
+          ${escHtml(skel.species_hint || "Articulated Rig")}
+        </div>
+      `;
+      const bList = document.createElement("div");
+      bList.className = "ufo-layer-list";
+      skel.bones.slice(0, 80).forEach((b) => {
+        const row = document.createElement("div");
+        row.className = "ufo-layer-row";
+        row.innerHTML = `
+          <i class="bi bi-dot" style="color:var(--ice)"></i>
+          <div class="ufo-layer-meta">
+            <span class="ufo-layer-name">${escHtml(b.name)}</span>
+            <span class="ufo-layer-sub">${b.parent != null ? `Parent: ${escHtml(skel.bones[b.parent]?.name || b.parent)}` : "Root Joint"}</span>
+          </div>
+        `;
+        bList.appendChild(row);
+      });
+      sSec.appendChild(bList);
+      side.appendChild(sSec);
+    }
+
+    shell.appendChild(side);
+  }
+
+  container.appendChild(shell);
+
   const gl = canvas.getContext("webgl2", { antialias: true, alpha: false }) || canvas.getContext("webgl", { antialias: true });
   let yaw = 0.65;
   let pitch = 0.42;
@@ -116,6 +382,7 @@ export function mountMeshViewer(container, meshData, getIsLight) {
   let panY = 0;
   let rafId = 0;
   let destroyed = false;
+  let lastFrameMs = performance.now();
 
   let drawFn = () => {};
   const createdTextures = [];
@@ -137,7 +404,7 @@ export function mountMeshViewer(container, meshData, getIsLight) {
         vUv = aUv;
         vCol = aCol;
         gl_Position = uMvp * vec4(aPos, 1.0);
-        gl_PointSize = max(1.0, uPointSize / max(gl_Position.w * 0.45, 0.35));
+        gl_PointSize = max(2.0, uPointSize / max(gl_Position.w * 0.45, 0.35));
       }
     `;
     const fsSrc = `
@@ -188,10 +455,10 @@ export function mountMeshViewer(container, meshData, getIsLight) {
     const locHasVCol = gl.getUniformLocation(prog, "uHasVCol");
     const locTex = gl.getUniformLocation(prog, "uTex");
 
-    const makeBuf = (data) => {
+    const makeBuf = (data, usage = gl.STATIC_DRAW) => {
       const b = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER, b);
-      gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+      gl.bufferData(gl.ARRAY_BUFFER, data, usage);
       return b;
     };
     const posBuf = makeBuf(normPos);
@@ -201,8 +468,17 @@ export function mountMeshViewer(container, meshData, getIsLight) {
     const wireBuf = makeBuf(wireData);
     const ptPosBuf = makeBuf(ptPos);
     const ptColBuf = ptColRaw.length === ptPos.length ? makeBuf(ptColRaw) : null;
+    const gridBuf = gridArr.length > 0 ? makeBuf(gridArr) : null;
+    const boneBuf = hasSkel ? gl.createBuffer() : null;
+    const jointBuf = hasSkel ? gl.createBuffer() : null;
 
-    // Upload embedded GLB/glTF textures asynchronously
+    // Pre-index clip channels by bone index
+    const clipChannelMaps = clips.map((c) => {
+      const m = new Map();
+      for (const ch of (c.channels || [])) m.set(ch.bone_index, ch);
+      return m;
+    });
+
     const glTextures = (meshData.textures || []).map((dataUrl) => {
       if (!dataUrl) return null;
       const tex = gl.createTexture();
@@ -229,6 +505,9 @@ export function mountMeshViewer(container, meshData, getIsLight) {
       ? meshData.batches
       : [{ start_vertex: 0, vertex_count: normPos.length / 3, base_color: [0.82, 0.92, 0.92, 1.0], texture_index: null }];
 
+    const scrubEl = hud.querySelector("[data-act='scrub']");
+    const timeEl = hud.querySelector("[data-act='timecode']");
+
     drawFn = () => {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const w = Math.max(canvas.clientWidth * dpr, 1);
@@ -252,6 +531,21 @@ export function mountMeshViewer(container, meshData, getIsLight) {
       gl.uniformMatrix4fv(locMvp, false, mvp);
       gl.uniformMatrix4fv(locModel, false, model);
       gl.uniform1f(locPtSize, ptSize * dpr);
+
+      if (showGrid && gridBuf && gridArr.length >= 6) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, gridBuf);
+        gl.enableVertexAttribArray(locPos);
+        gl.vertexAttribPointer(locPos, 3, gl.FLOAT, false, 0, 0);
+        gl.disableVertexAttribArray(locNrm);
+        if (locUv >= 0) gl.disableVertexAttribArray(locUv);
+        if (locCol >= 0) gl.disableVertexAttribArray(locCol);
+        gl.uniform1f(locMode, 0.0);
+        gl.uniform1f(locHasTex, 0.0);
+        gl.uniform1f(locHasVCol, 0.0);
+        if (isLight) gl.uniform4f(locBaseCol, 0.1, 0.14, 0.15, 0.25);
+        else gl.uniform4f(locBaseCol, 0.35, 0.45, 0.48, 0.32);
+        gl.drawArrays(gl.LINES, 0, gridArr.length / 3);
+      }
 
       if (showSolid && normPos.length >= 9) {
         gl.disable(gl.BLEND);
@@ -286,7 +580,9 @@ export function mountMeshViewer(container, meshData, getIsLight) {
         }
 
         gl.uniform1f(locMode, 1.0);
-        for (const b of batches) {
+        batches.forEach((b, bi) => {
+          const ownerLayer = batchToLayer.get(bi);
+          if (ownerLayer !== undefined && !layerVisible[ownerLayer]) return;
           const tex = (showTextures && b.texture_index != null) ? glTextures[b.texture_index] : null;
           if (tex) {
             gl.activeTexture(gl.TEXTURE0);
@@ -296,10 +592,13 @@ export function mountMeshViewer(container, meshData, getIsLight) {
           } else {
             gl.uniform1f(locHasTex, 0.0);
           }
-          const bc = b.base_color || [0.82, 0.92, 0.92, 1.0];
+          let bc = b.base_color || [0.82, 0.92, 0.92, 1.0];
+          if (hoveredLayerIdx >= 0 && ownerLayer === hoveredLayerIdx) {
+            bc = [Math.min(1, bc[0] + 0.25), Math.min(1, bc[1] + 0.3), Math.min(1, bc[2] + 0.3), bc[3]];
+          }
           gl.uniform4f(locBaseCol, bc[0], bc[1], bc[2], bc[3]);
           gl.drawArrays(gl.TRIANGLES, b.start_vertex, b.vertex_count);
-        }
+        });
       }
 
       if (showWire && wireData.length >= 6) {
@@ -347,6 +646,75 @@ export function mountMeshViewer(container, meshData, getIsLight) {
         gl.uniform1f(locHasTex, 0.0);
         gl.drawArrays(gl.POINTS, 0, ptPos.length / 3);
         gl.disable(gl.BLEND);
+      }
+
+      if (showBones && hasSkel && boneBuf && jointBuf) {
+        const activeClip = clips[animClipIdx] || null;
+        const chMap = clipChannelMaps[animClipIdx] || new Map();
+        const dur = activeClip ? Math.max(activeClip.duration_secs, 0.1) : 1.0;
+        const t = animTime % dur;
+        if (scrubEl && dur > 0) scrubEl.value = (t / dur).toFixed(3);
+        if (timeEl) timeEl.textContent = `${t.toFixed(2)}s`;
+
+        const bones = skel.bones;
+        const worlds = new Array(bones.length);
+        const pts = new Array(bones.length);
+        for (let i = 0; i < bones.length; i++) {
+          const b = bones[i];
+          const ch = chMap.get(i);
+          const locP = ch ? sampleVec3(ch.times, ch.translations, t, b.rest_local_pos) : b.rest_local_pos;
+          const locR = ch ? sampleQuat(ch.times, ch.rotations, t, b.rest_local_rot) : b.rest_local_rot;
+          const locS = ch ? sampleVec3(ch.times, ch.scales, t, [1, 1, 1]) : [1, 1, 1];
+          const lmat = quatToMat4(locR, locP, locS);
+          const wmat = (b.parent != null && b.parent < i) ? mulMat4F64(worlds[b.parent], lmat) : lmat;
+          worlds[i] = wmat;
+          pts[i] = [
+            (wmat[12] - cx) * scale,
+            (wmat[13] - cy) * scale,
+            (wmat[14] - cz) * scale,
+          ];
+        }
+
+        const segs = [];
+        const joints = [];
+        for (let i = 0; i < bones.length; i++) {
+          const p = pts[i];
+          joints.push(p[0], p[1], p[2]);
+          const pi = bones[i].parent;
+          if (pi != null && pi >= 0 && pi < i) {
+            const pp = pts[pi];
+            segs.push(pp[0], pp[1], pp[2], p[0], p[1], p[2]);
+          }
+        }
+
+        if (hasSolid) gl.disable(gl.DEPTH_TEST);
+        gl.disableVertexAttribArray(locNrm);
+        if (locUv >= 0) gl.disableVertexAttribArray(locUv);
+        if (locCol >= 0) gl.disableVertexAttribArray(locCol);
+        gl.uniform1f(locHasTex, 0.0);
+        gl.uniform1f(locHasVCol, 0.0);
+
+        if (segs.length >= 6) {
+          gl.bindBuffer(gl.ARRAY_BUFFER, boneBuf);
+          gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(segs), gl.DYNAMIC_DRAW);
+          gl.enableVertexAttribArray(locPos);
+          gl.vertexAttribPointer(locPos, 3, gl.FLOAT, false, 0, 0);
+          gl.uniform1f(locMode, 0.0);
+          if (isLight) gl.uniform4f(locBaseCol, 0.02, 0.35, 0.42, 1.0);
+          else gl.uniform4f(locBaseCol, 0.68, 0.98, 1.0, 1.0);
+          gl.drawArrays(gl.LINES, 0, segs.length / 3);
+        }
+        if (joints.length >= 3) {
+          gl.bindBuffer(gl.ARRAY_BUFFER, jointBuf);
+          gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(joints), gl.DYNAMIC_DRAW);
+          gl.enableVertexAttribArray(locPos);
+          gl.vertexAttribPointer(locPos, 3, gl.FLOAT, false, 0, 0);
+          gl.uniform1f(locMode, 2.0);
+          if (isLight) gl.uniform4f(locBaseCol, 0.05, 0.1, 0.14, 1.0);
+          else gl.uniform4f(locBaseCol, 1.0, 0.85, 0.35, 1.0);
+          gl.drawArrays(gl.POINTS, 0, joints.length / 3);
+        }
+        if (hasSolid) gl.enable(gl.DEPTH_TEST);
       }
     };
   }
@@ -402,19 +770,45 @@ export function mountMeshViewer(container, meshData, getIsLight) {
     if (act === "solid") { showSolid = !showSolid; btn.classList.toggle("active", showSolid); }
     if (act === "tex") { showTextures = !showTextures; btn.classList.toggle("active", showTextures); }
     if (act === "wire") { showWire = !showWire; btn.classList.toggle("active", showWire); }
+    if (act === "bones") { showBones = !showBones; btn.classList.toggle("active", showBones); }
+    if (act === "grid") { showGrid = !showGrid; btn.classList.toggle("active", showGrid); }
     if (act === "pts") { showPoints = !showPoints; btn.classList.toggle("active", showPoints); }
     if (act === "spin") { autoSpin = !autoSpin; btn.classList.toggle("active", autoSpin); }
+    if (act === "play") {
+      animPlaying = !animPlaying;
+      btn.classList.toggle("active", animPlaying);
+      btn.innerHTML = animPlaying ? `<i class="bi bi-pause-fill"></i> LOOP` : `<i class="bi bi-play-fill"></i> PLAY`;
+    }
+    if (act === "speed") {
+      animSpeed = animSpeed === 1.0 ? 0.5 : animSpeed === 0.5 ? 2.0 : animSpeed === 2.0 ? 0.25 : 1.0;
+      btn.textContent = `${animSpeed}x`;
+    }
     if (act === "reset") { yaw = 0.65; pitch = 0.42; dist = 3.1; panX = 0; panY = 0; }
+  });
+  hud.addEventListener("change", (e) => {
+    if (e.target.dataset.act === "clip") {
+      animClipIdx = parseInt(e.target.value, 10) || 0;
+      animTime = 0;
+    }
   });
   hud.addEventListener("input", (e) => {
     if (e.target.dataset.act === "ptsize") {
       ptSize = parseFloat(e.target.value) || 4.0;
+    } else if (e.target.dataset.act === "scrub") {
+      const c = clips[animClipIdx];
+      if (c) animTime = (parseFloat(e.target.value) || 0) * Math.max(c.duration_secs, 0.1);
     }
   });
 
-  function frame() {
+  function frame(now) {
     if (destroyed) return;
-    if (autoSpin) yaw += 0.0032; // Smooth reduced studio turntable spin speed
+    const dt = Math.min((now - lastFrameMs) / 1000, 0.1);
+    lastFrameMs = now;
+    if (autoSpin) yaw += 0.0032;
+    if (animPlaying && clips.length > 0) {
+      const dur = Math.max(clips[animClipIdx]?.duration_secs || 1.0, 0.1);
+      animTime = (animTime + dt * animSpeed) % dur;
+    }
     drawFn();
     rafId = requestAnimationFrame(frame);
   }

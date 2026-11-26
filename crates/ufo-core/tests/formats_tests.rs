@@ -646,3 +646,782 @@ fn extracts_svg_frame_dimensions_and_html_raw_render() {
         other => panic!("Expected Text payload for HTML, got {other:?}"),
     }
 }
+
+fn make_png_bytes(w: u32, h: u32, rgba: [u8; 4]) -> Vec<u8> {
+    let img = image::RgbaImage::from_pixel(w, h, image::Rgba(rgba));
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .unwrap();
+    out
+}
+
+fn wrap_zstd_raw_frame(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len() + 32);
+    out.extend_from_slice(&[0x28, 0xB5, 0x2F, 0xFD]); // Zstd frame magic
+    out.push(0xA0); // Single_Segment=1, FCS_Field_Size=2 (4 bytes LE)
+    out.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+    if raw.is_empty() {
+        out.extend_from_slice(&[0x01, 0x00, 0x00]);
+        return out;
+    }
+    for (ci, chunk) in raw.chunks(128 * 1024).enumerate() {
+        let is_last = (ci + 1) * 128 * 1024 >= raw.len();
+        let hdr = ((chunk.len() as u32) << 3) | u32::from(is_last);
+        out.extend_from_slice(&hdr.to_le_bytes()[..3]);
+        out.extend_from_slice(chunk);
+    }
+    out
+}
+
+#[test]
+fn decodes_solidcore_step_multi_solid_layers_and_freecad_xml_metadata() {
+    let step = concat!(
+        "ISO-10303-21;\n",
+        "HEADER;\n",
+        "FILE_DESCRIPTION(('STEP Assembly'),'2;1');\n",
+        "FILE_NAME('assy.step','2026-11-26',(''),(''),'','','');\n",
+        "FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\n",
+        "ENDSEC;\n",
+        "DATA;\n",
+        "#1=CARTESIAN_POINT('',(0.,0.,0.));\n",
+        "#2=CARTESIAN_POINT('',(10.,0.,0.));\n",
+        "#3=DIRECTION('',(0.,0.,-1.));\n",
+        "#4=DIRECTION('',(1.,0.,0.));\n",
+        "#5=DIRECTION('',(0.,-1.,0.));\n",
+        "#6=DIRECTION('',(-1.,0.,0.));\n",
+        "#7=DIRECTION('',(0.,0.,1.));\n",
+        "#8=DIRECTION('',(0.57735027,0.57735027,0.57735027));\n",
+        "#9=DIRECTION('',(-0.70710678,0.70710678,0.));\n",
+        "#10=CARTESIAN_POINT('',(0.,0.,0.));\n",
+        "#11=CARTESIAN_POINT('',(10.,0.,0.));\n",
+        "#12=CARTESIAN_POINT('',(0.,10.,0.));\n",
+        "#13=CARTESIAN_POINT('',(0.,0.,10.));\n",
+        "#14=AXIS2_PLACEMENT_3D('',#1,#3,#4);\n",
+        "#15=AXIS2_PLACEMENT_3D('',#1,#5,#4);\n",
+        "#16=AXIS2_PLACEMENT_3D('',#1,#6,#7);\n",
+        "#17=AXIS2_PLACEMENT_3D('',#2,#8,#9);\n",
+        "#18=PLANE('',#14);\n",
+        "#19=PLANE('',#15);\n",
+        "#20=PLANE('',#16);\n",
+        "#21=PLANE('',#17);\n",
+        "#22=VERTEX_POINT('',#10);\n",
+        "#23=VERTEX_POINT('',#11);\n",
+        "#24=VERTEX_POINT('',#12);\n",
+        "#25=VERTEX_POINT('',#13);\n",
+        "#26=DIRECTION('',(1.,0.,0.));\n",
+        "#27=DIRECTION('',(-0.70710678,0.70710678,0.));\n",
+        "#28=DIRECTION('',(0.,-1.,0.));\n",
+        "#29=DIRECTION('',(0.,0.,1.));\n",
+        "#30=DIRECTION('',(-0.70710678,0.,0.70710678));\n",
+        "#31=DIRECTION('',(0.,-0.70710678,0.70710678));\n",
+        "#32=VECTOR('',#26,10.);\n",
+        "#33=VECTOR('',#27,14.1421356);\n",
+        "#34=VECTOR('',#28,10.);\n",
+        "#35=VECTOR('',#29,10.);\n",
+        "#36=VECTOR('',#30,14.1421356);\n",
+        "#37=VECTOR('',#31,14.1421356);\n",
+        "#40=LINE('',#10,#32);\n",
+        "#41=LINE('',#11,#33);\n",
+        "#42=LINE('',#12,#34);\n",
+        "#43=LINE('',#10,#35);\n",
+        "#44=LINE('',#11,#36);\n",
+        "#45=LINE('',#12,#37);\n",
+        "#50=EDGE_CURVE('',#22,#23,#40,.T.);\n",
+        "#51=EDGE_CURVE('',#23,#24,#41,.T.);\n",
+        "#52=EDGE_CURVE('',#24,#22,#42,.T.);\n",
+        "#53=EDGE_CURVE('',#22,#25,#43,.T.);\n",
+        "#54=EDGE_CURVE('',#23,#25,#44,.T.);\n",
+        "#55=EDGE_CURVE('',#24,#25,#45,.T.);\n",
+        "#60=ORIENTED_EDGE('',*,*,#52,.F.);\n",
+        "#61=ORIENTED_EDGE('',*,*,#51,.F.);\n",
+        "#62=ORIENTED_EDGE('',*,*,#50,.F.);\n",
+        "#63=ORIENTED_EDGE('',*,*,#50,.T.);\n",
+        "#64=ORIENTED_EDGE('',*,*,#54,.T.);\n",
+        "#65=ORIENTED_EDGE('',*,*,#53,.F.);\n",
+        "#66=ORIENTED_EDGE('',*,*,#53,.T.);\n",
+        "#67=ORIENTED_EDGE('',*,*,#55,.F.);\n",
+        "#68=ORIENTED_EDGE('',*,*,#52,.T.);\n",
+        "#69=ORIENTED_EDGE('',*,*,#51,.T.);\n",
+        "#70=ORIENTED_EDGE('',*,*,#55,.T.);\n",
+        "#71=ORIENTED_EDGE('',*,*,#54,.F.);\n",
+        "#75=EDGE_LOOP('',(#60,#61,#62));\n",
+        "#76=EDGE_LOOP('',(#63,#64,#65));\n",
+        "#77=EDGE_LOOP('',(#66,#67,#68));\n",
+        "#78=EDGE_LOOP('',(#69,#70,#71));\n",
+        "#80=FACE_OUTER_BOUND('',#75,.T.);\n",
+        "#81=FACE_OUTER_BOUND('',#76,.T.);\n",
+        "#82=FACE_OUTER_BOUND('',#77,.T.);\n",
+        "#83=FACE_OUTER_BOUND('',#78,.T.);\n",
+        "#90=ADVANCED_FACE('',(#80),#18,.T.);\n",
+        "#91=ADVANCED_FACE('',(#81),#19,.T.);\n",
+        "#92=ADVANCED_FACE('',(#82),#20,.T.);\n",
+        "#93=ADVANCED_FACE('',(#83),#21,.T.);\n",
+        "#100=CLOSED_SHELL('',(#90,#91,#92,#93));\n",
+        "#110=MANIFOLD_SOLID_BREP('TetraA',#100);\n",
+        "#111=MANIFOLD_SOLID_BREP('TetraB',#100);\n",
+        "ENDSEC;\n",
+        "END-ISO-10303-21;\n"
+    );
+
+    let rep = open_bytes("assembly.step", step.as_bytes(), None);
+    assert_eq!(rep.detected.id, "step");
+    match rep.viewer {
+        ViewerPayload::Mesh3d {
+            format_label,
+            triangle_count,
+            layers,
+            materials,
+            edge_count,
+            ..
+        } => {
+            assert!(
+                format_label.contains("Solidcore"),
+                "Expected Solidcore STEP label, got {format_label}"
+            );
+            assert!(triangle_count >= 4, "Expected triangles from 2 STEP solids, got {triangle_count}");
+            assert!(edge_count >= 4, "Expected B-rep edges, got {edge_count}");
+            assert!(layers.len() >= 2, "Expected per-solid SceneLayer3d entries, got {}", layers.len());
+            assert!(!materials.is_empty());
+        }
+        other => panic!("Expected Solidcore STEP Mesh3d, got {other:?}"),
+    }
+
+    // FreeCAD archive with Document.xml + GuiDocument.xml
+    let mut fcstd_buf = Vec::new();
+    {
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut fcstd_buf));
+        let opts = zip::write::SimpleFileOptions::default();
+        zw.start_file("Document.xml", opts).unwrap();
+        zw.write_all(
+            br#"<?xml version="1.0" encoding="utf-8"?>
+<Document SchemaVersion="4">
+  <Objects Count="2">
+    <Object type="Part::Box" name="Box" />
+    <Object type="Part::Cylinder" name="Cyl" />
+  </Objects>
+  <ObjectData Count="2">
+    <Object name="Box"><Properties Count="1"><Property name="Label" type="App::PropertyString"><String value="BasePlate"/></Property></Properties></Object>
+    <Object name="Cyl"><Properties Count="1"><Property name="Label" type="App::PropertyString"><String value="PinHidden"/></Property></Properties></Object>
+  </ObjectData>
+</Document>"#,
+        ).unwrap();
+        zw.start_file("GuiDocument.xml", opts).unwrap();
+        zw.write_all(
+            br#"<?xml version="1.0" encoding="utf-8"?>
+<Document>
+  <ViewProviderData Count="2">
+    <ViewProvider name="Box"><Properties Count="2"><Property name="Visibility" type="App::PropertyBool"><Bool value="true"/></Property><Property name="ShapeColor" type="App::PropertyColor"><PropertyColor value="3368601855"/></Property></Properties></ViewProvider>
+    <ViewProvider name="Cyl"><Properties Count="1"><Property name="Visibility" type="App::PropertyBool"><Bool value="false"/></Property></Properties></ViewProvider>
+  </ViewProviderData>
+</Document>"#,
+        ).unwrap();
+        zw.finish().unwrap();
+    }
+    let fc_rep = open_bytes("assembly.fcstd", &fcstd_buf, None);
+    assert_eq!(fc_rep.detected.id, "fcstd");
+}
+
+#[test]
+fn decodes_bvh_and_fbx_skeletal_animations_across_species() {
+    let human_bvh = concat!(
+        "HIERARCHY\n",
+        "ROOT Hips\n{\n  OFFSET 0.0 90.0 0.0\n  CHANNELS 6 Xposition Yposition Zposition Zrotation Xrotation Yrotation\n",
+        "  JOINT Spine\n  {\n    OFFSET 0.0 15.0 0.0\n    CHANNELS 3 Zrotation Xrotation Yrotation\n",
+        "    JOINT Head\n    {\n      OFFSET 0.0 20.0 0.0\n      CHANNELS 3 Zrotation Xrotation Yrotation\n",
+        "      End Site\n      {\n        OFFSET 0.0 10.0 0.0\n      }\n    }\n",
+        "    JOINT LeftArm\n    {\n      OFFSET 12.0 14.0 0.0\n      CHANNELS 3 Zrotation Xrotation Yrotation\n",
+        "      End Site\n      {\n        OFFSET 25.0 0.0 0.0\n      }\n    }\n",
+        "  }\n",
+        "  JOINT LeftUpLeg\n  {\n    OFFSET 10.0 -5.0 0.0\n    CHANNELS 3 Zrotation Xrotation Yrotation\n",
+        "    JOINT LeftFoot\n    {\n      OFFSET 0.0 -40.0 0.0\n      CHANNELS 3 Zrotation Xrotation Yrotation\n",
+        "      End Site\n      {\n        OFFSET 0.0 -5.0 12.0\n      }\n    }\n",
+        "  }\n",
+        "}\n",
+        "MOTION\n",
+        "Frames: 2\n",
+        "Frame Time: 0.0333333\n",
+        "0 90 0 0 0 0 5 0 0 0 0 0 10 0 0 -15 0 0 5 0 0\n",
+        "0 91 2 0 10 0 10 0 0 0 5 0 -10 0 0 15 0 0 -5 0 0\n"
+    );
+    let rep_human = open_bytes("walk.bvh", human_bvh.as_bytes(), None);
+    assert_eq!(rep_human.detected.id, "bvh");
+    match rep_human.viewer {
+        ViewerPayload::Mesh3d { skeleton: Some(skel), .. } => {
+            assert!(skel.bones.len() >= 6);
+            assert_eq!(skel.clips.len(), 1);
+            assert!(skel.clips[0].duration_secs > 0.0);
+            assert!(!skel.clips[0].channels.is_empty());
+            assert!(skel.clips[0].channels[0].times.len() >= 2);
+            assert!(
+                skel.species_hint.as_deref().unwrap_or("").to_ascii_lowercase().contains("biped")
+                    || skel.species_hint.as_deref().unwrap_or("").to_ascii_lowercase().contains("human"),
+                "Unexpected species hint: {:?}",
+                skel.species_hint
+            );
+        }
+        other => panic!("Expected BVH skeleton Mesh3d, got {other:?}"),
+    }
+
+    let bird_bvh = concat!(
+        "HIERARCHY\n",
+        "ROOT Chest\n{\n  OFFSET 0.0 40.0 0.0\n  CHANNELS 6 Xposition Yposition Zposition Zrotation Xrotation Yrotation\n",
+        "  JOINT WingL\n  {\n    OFFSET 8.0 2.0 0.0\n    CHANNELS 3 Zrotation Xrotation Yrotation\n",
+        "    End Site { OFFSET 18.0 0.0 0.0 }\n  }\n",
+        "  JOINT WingR\n  {\n    OFFSET -8.0 2.0 0.0\n    CHANNELS 3 Zrotation Xrotation Yrotation\n",
+        "    End Site { OFFSET -18.0 0.0 0.0 }\n  }\n",
+        "  JOINT Beak\n  {\n    OFFSET 0.0 6.0 10.0\n    CHANNELS 3 Zrotation Xrotation Yrotation\n",
+        "    End Site { OFFSET 0.0 0.0 4.0 }\n  }\n",
+        "  JOINT Tail\n  {\n    OFFSET 0.0 -2.0 -12.0\n    CHANNELS 3 Zrotation Xrotation Yrotation\n",
+        "    End Site { OFFSET 0.0 0.0 -8.0 }\n  }\n",
+        "}\nMOTION\nFrames: 2\nFrame Time: 0.04\n",
+        "0 40 0 0 0 0 25 0 0 -25 0 0 0 0 0 5 0 0\n",
+        "0 42 1 0 0 0 -30 0 0 30 0 0 0 0 0 -5 0 0\n"
+    );
+    let rep_bird = open_bytes("flap.bvh", bird_bvh.as_bytes(), None);
+    match rep_bird.viewer {
+        ViewerPayload::Mesh3d { skeleton: Some(skel), .. } => {
+            let hint = skel.species_hint.unwrap_or_default().to_ascii_lowercase();
+            assert!(hint.contains("avian") || hint.contains("bird"), "Expected avian/bird hint, got {hint}");
+        }
+        other => panic!("Expected avian BVH skeleton, got {other:?}"),
+    }
+
+    // ASCII FBX quadruped skeleton + animation clip
+    let fbx_ascii = concat!(
+        "; FBX 7.4.0 project file\n",
+        "FBXHeaderExtension:  {\n  FBXHeaderVersion: 1003\n}\n",
+        "Objects:  {\n",
+        "  Model: 100, \"Model::Pelvis\", \"LimbNode\" {\n    Properties70:  {\n      P: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",0,10,0\n    }\n  }\n",
+        "  Model: 101, \"Model::FrontLegL\", \"LimbNode\" {\n    Properties70:  {\n      P: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",5,-8,6\n    }\n  }\n",
+        "  Model: 102, \"Model::HindLegR\", \"LimbNode\" {\n    Properties70:  {\n      P: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",-5,-8,-6\n    }\n  }\n",
+        "  Model: 103, \"Model::Tail\", \"LimbNode\" {\n    Properties70:  {\n      P: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",0,2,-10\n    }\n  }\n",
+        "  AnimationStack: 200, \"AnimStack::Trot\", \"\" {}\n",
+        "  AnimationLayer: 201, \"AnimLayer::Base\", \"\" {}\n",
+        "  AnimationCurveNode: 301, \"AnimCurveNode::R\", \"\" {}\n",
+        "  AnimationCurve: 401, \"AnimCurve::X\", \"\" {\n",
+        "    KeyTime: *2 { a: 0,46186158000 }\n",
+        "    KeyValueFloat: *2 { a: -20.0,20.0 }\n",
+        "  }\n",
+        "}\n",
+        "Connections:  {\n",
+        "  C: \"OO\",101,100\n",
+        "  C: \"OO\",102,100\n",
+        "  C: \"OO\",103,100\n",
+        "  C: \"OO\",201,200\n",
+        "  C: \"OO\",301,201\n",
+        "  C: \"OP\",301,101, \"Lcl Rotation\"\n",
+        "  C: \"OP\",401,301, \"d|X\"\n",
+        "}\n"
+    );
+    let rep_fbx = open_bytes("quadruped_trot.fbx", fbx_ascii.as_bytes(), None);
+    assert_eq!(rep_fbx.detected.id, "fbx");
+    match rep_fbx.viewer {
+        ViewerPayload::Mesh3d { skeleton: Some(skel), .. } => {
+            assert!(skel.bones.len() >= 4, "Expected >=4 FBX bones, got {}", skel.bones.len());
+            assert!(!skel.clips.is_empty(), "Expected FBX animation clips");
+            let hint = skel.species_hint.unwrap_or_default().to_ascii_lowercase();
+            assert!(hint.contains("quadruped") || hint.contains("animal"), "Expected quadruped hint, got {hint}");
+        }
+        other => panic!("Expected FBX skeleton Mesh3d, got {other:?}"),
+    }
+}
+
+#[test]
+fn decodes_blender_multi_object_layers_materials_and_packed_textures() {
+    fn push_large_bhead(dst: &mut Vec<u8>, code: &[u8; 4], sdna: i32, old: u64, nr: i64, payload: &[u8]) {
+        dst.extend_from_slice(code);
+        dst.extend_from_slice(&sdna.to_le_bytes());
+        dst.extend_from_slice(&old.to_le_bytes());
+        dst.extend_from_slice(&(payload.len() as i64).to_le_bytes());
+        dst.extend_from_slice(&nr.to_le_bytes());
+        dst.extend_from_slice(payload);
+    }
+
+    let names = [
+        "name[66]",             // 0
+        "totvert",              // 1
+        "faces_num",            // 2
+        "*face_offset_indices", // 3
+        "attribute_storage",    // 4
+        "id",                   // 5
+        "*dna_attributes",      // 6
+        "dna_attributes_num",   // 7
+        "*name",                // 8
+        "*data",                // 9
+        "totcol",               // 10
+        "**mat",                // 11
+        "r",                    // 12
+        "g",                    // 13
+        "b",                    // 14
+        "a",                    // 15
+        "size",                 // 16
+        "*packedfile",          // 17
+        "type",                 // 18
+        "visibility_flag",      // 19
+        "loc[3]",               // 20
+        "scale[3]",             // 21
+    ];
+    let types = [
+        "char",             // 0: 1
+        "int",              // 1: 4
+        "void",             // 2: 0
+        "float",            // 3: 4
+        "short",            // 4: 2
+        "ID",               // 5: 68
+        "AttributeArray",   // 6: 8
+        "Attribute",        // 7: 16
+        "AttributeStorage", // 8: 16
+        "PackedFile",       // 9: 16
+        "Image",            // 10: 76
+        "Material",         // 11: 84
+        "Mesh",             // 12: 108
+        "Object",           // 13: 108
+    ];
+    let type_lens: [u16; 14] = [1, 4, 0, 4, 2, 68, 8, 16, 16, 16, 76, 84, 108, 108];
+
+    let mut dna = Vec::new();
+    dna.extend_from_slice(b"SDNA");
+    dna.extend_from_slice(b"NAME");
+    dna.extend_from_slice(&(names.len() as u32).to_le_bytes());
+    for n in names { dna.extend_from_slice(n.as_bytes()); dna.push(0); }
+    while dna.len() % 4 != 0 { dna.push(0); }
+
+    dna.extend_from_slice(b"TYPE");
+    dna.extend_from_slice(&(types.len() as u32).to_le_bytes());
+    for t in types { dna.extend_from_slice(t.as_bytes()); dna.push(0); }
+    while dna.len() % 4 != 0 { dna.push(0); }
+
+    dna.extend_from_slice(b"TLEN");
+    for l in type_lens { dna.extend_from_slice(&l.to_le_bytes()); }
+    while dna.len() % 4 != 0 { dna.push(0); }
+
+    dna.extend_from_slice(b"STRC");
+    dna.extend_from_slice(&9u32.to_le_bytes());
+    for (ti, fields) in [
+        // 0: ID { char name[66]; }
+        (5u16, vec![(0u16, 0u16)]),
+        // 1: AttributeArray { void *data; }
+        (6u16, vec![(2u16, 9u16)]),
+        // 2: Attribute { char *name; void *data; }
+        (7u16, vec![(0u16, 8u16), (2u16, 9u16)]),
+        // 3: AttributeStorage { Attribute *dna_attributes; int dna_attributes_num; }
+        (8u16, vec![(7u16, 6u16), (1u16, 7u16)]),
+        // 4: PackedFile { int size; void *data; } (note align: 4 + 4 pad + 8 ptr = 16 -> put int size; int totvert(pad); void *data)
+        (9u16, vec![(1u16, 16u16), (2u16, 9u16)]),
+        // 5: Image { ID id; PackedFile *packedfile; } (68 + 8 = 76)
+        (10u16, vec![(5u16, 5u16), (9u16, 17u16)]),
+        // 6: Material { ID id; float r, g, b, a; } (68 + 16 = 84)
+        (11u16, vec![(5u16, 5u16), (3u16, 12u16), (3u16, 13u16), (3u16, 14u16), (3u16, 15u16)]),
+        // 7: Mesh { ID id; int totvert; int faces_num; int *face_offset_indices; AttributeStorage attribute_storage; short totcol; Material **mat; } (68+4+4+8+16+4+8 -> let totcol be int to keep 4+8 aligned: 68+4+4+8+16+4(totcol? short=2 so offset 100..108 ptr -> 68+4+4+8+16 = 100 -> put **mat @ 100..108, totcol @ 108..112? wait size=108: put short totcol + short pad or use int size matches! Actually put *mat before padding? Let's keep totcol as i16 + **mat at offset 100..108 if Mesh type_len = 112: 68..100=AttrStorage, 100..108 **mat, 108..110 totcol => keep *mat at 100..108 and totcol at 108)!
+        (12u16, vec![(5u16, 5u16), (1u16, 1u16), (1u16, 2u16), (1u16, 3u16), (8u16, 4u16), (11u16, 11u16), (4u16, 10u16)]),
+        // 8: Object { ID id; short type; short totcol; void *data; int visibility_flag; float loc[3]; float scale[3]; }
+        // Offsets: 0..68 ID, 68..70 type, 70..72 pad(totcol), 72..80 *data, 80..84 visibility_flag, 84..96 loc[3], 96..108 scale[3] => 108 bytes!
+        (13u16, vec![(5u16, 5u16), (4u16, 18u16), (4u16, 10u16), (2u16, 9u16), (1u16, 19u16), (3u16, 20u16), (3u16, 21u16)]),
+    ] {
+        dna.extend_from_slice(&ti.to_le_bytes());
+        dna.extend_from_slice(&(fields.len() as u16).to_le_bytes());
+        for (ft, fn_i) in fields {
+            dna.extend_from_slice(&ft.to_le_bytes());
+            dna.extend_from_slice(&fn_i.to_le_bytes());
+        }
+    }
+    // Fix Mesh TLEN index 12 from 108 to 110 (68 + 4 + 4 + 8 + 16 + 8 + 2 = 110)
+    let tlen_pos = dna.windows(4).position(|w| w == b"TLEN").unwrap() + 4;
+    dna[tlen_pos + 12 * 2..tlen_pos + 13 * 2].copy_from_slice(&110u16.to_le_bytes());
+
+    let mut blend = Vec::new();
+    blend.extend_from_slice(b"BLENDER17-01v0503");
+
+    let mut sc_id = vec![0u8; 68];
+    sc_id[..7].copy_from_slice(b"SCScene");
+    push_large_bhead(&mut blend, b"SC\0\0", 0, 0x1000, 1, &sc_id);
+
+    // Packed PNG texture -> PackedFile -> Image
+    let png_tex = make_png_bytes(2, 2, [20, 220, 180, 255]);
+    push_large_bhead(&mut blend, b"DATA", 0, 0x1100, 1, &png_tex);
+    // Note PackedFile DNA struct 4 has int size (4) + void* data (8) = 12 bytes in tight DNA layout above!
+    let mut pf = vec![0u8; 12];
+    pf[0..4].copy_from_slice(&(png_tex.len() as i32).to_le_bytes());
+    pf[4..12].copy_from_slice(&0x1100u64.to_le_bytes());
+    push_large_bhead(&mut blend, b"DATA", 4, 0x1101, 1, &pf);
+
+    let mut im = vec![0u8; 76];
+    im[..8].copy_from_slice(b"IMTexAlb");
+    im[68..76].copy_from_slice(&0x1101u64.to_le_bytes());
+    push_large_bhead(&mut blend, b"IM\0\0", 5, 0x1102, 1, &im);
+
+    // Material
+    let mut ma = vec![0u8; 84];
+    ma[..8].copy_from_slice(b"MAAlloy1");
+    ma[68..72].copy_from_slice(&0.2f32.to_le_bytes());
+    ma[72..76].copy_from_slice(&0.8f32.to_le_bytes());
+    ma[76..80].copy_from_slice(&0.9f32.to_le_bytes());
+    ma[80..84].copy_from_slice(&1.0f32.to_le_bytes());
+    push_large_bhead(&mut blend, b"MA\0\0", 6, 0x1200, 1, &ma);
+    push_large_bhead(&mut blend, b"DATA", 0, 0x1201, 1, &0x1200u64.to_le_bytes());
+
+    // Mesh geometry buffers
+    let mut pos_buf = Vec::new();
+    for p in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+        for f in p { pos_buf.extend_from_slice(&f.to_le_bytes()); }
+    }
+    let cv_buf: Vec<u8> = [0i32, 1, 2].iter().flat_map(|i| i.to_le_bytes()).collect();
+    let fo_buf: Vec<u8> = [0i32, 3].iter().flat_map(|i| i.to_le_bytes()).collect();
+    push_large_bhead(&mut blend, b"DATA", 0, 0x2001, 1, b"position\0");
+    push_large_bhead(&mut blend, b"DATA", 0, 0x2002, 1, &pos_buf);
+    push_large_bhead(&mut blend, b"DATA", 1, 0x2003, 1, &0x2002u64.to_le_bytes());
+    push_large_bhead(&mut blend, b"DATA", 0, 0x2004, 1, b".corner_vert\0");
+    push_large_bhead(&mut blend, b"DATA", 0, 0x2005, 1, &cv_buf);
+    push_large_bhead(&mut blend, b"DATA", 1, 0x2006, 1, &0x2005u64.to_le_bytes());
+    push_large_bhead(&mut blend, b"DATA", 0, 0x2007, 1, &fo_buf);
+
+    let mut attrs = Vec::new();
+    attrs.extend_from_slice(&0x2001u64.to_le_bytes());
+    attrs.extend_from_slice(&0x2003u64.to_le_bytes());
+    attrs.extend_from_slice(&0x2004u64.to_le_bytes());
+    attrs.extend_from_slice(&0x2006u64.to_le_bytes());
+    push_large_bhead(&mut blend, b"DATA", 2, 0x3000, 2, &attrs);
+
+    // Mesh @ 0x4000
+    let mut mesh = vec![0u8; 110];
+    mesh[..6].copy_from_slice(b"MEQuad");
+    mesh[68..72].copy_from_slice(&3i32.to_le_bytes());
+    mesh[72..76].copy_from_slice(&1i32.to_le_bytes());
+    mesh[76..84].copy_from_slice(&0x2007u64.to_le_bytes());
+    mesh[84..92].copy_from_slice(&0x3000u64.to_le_bytes());
+    mesh[92..96].copy_from_slice(&2i32.to_le_bytes());
+    mesh[100..108].copy_from_slice(&0x1201u64.to_le_bytes());
+    mesh[108..110].copy_from_slice(&1i16.to_le_bytes());
+    push_large_bhead(&mut blend, b"ME\0\0", 7, 0x4000, 1, &mesh);
+
+    // 2 Objects: LayerVisible & LayerHidden
+    for (idx, (oid, vis_flag, lx)) in [(0x4100u64, 0i32, 0.0f32), (0x4101u64, 0x0fi32, 3.0f32)].iter().enumerate() {
+        let mut ob = vec![0u8; 108];
+        let nm = if idx == 0 { b"OBLayerVisible".as_slice() } else { b"OBLayerHidden".as_slice() };
+        ob[..nm.len()].copy_from_slice(nm);
+        ob[68..70].copy_from_slice(&1i16.to_le_bytes()); // OB_MESH
+        ob[72..80].copy_from_slice(&0x4000u64.to_le_bytes());
+        ob[80..84].copy_from_slice(&vis_flag.to_le_bytes());
+        ob[84..88].copy_from_slice(&lx.to_le_bytes());
+        ob[96..100].copy_from_slice(&1.0f32.to_le_bytes());
+        ob[100..104].copy_from_slice(&1.0f32.to_le_bytes());
+        ob[104..108].copy_from_slice(&1.0f32.to_le_bytes());
+        push_large_bhead(&mut blend, b"OB\0\0", 8, *oid, 1, &ob);
+    }
+
+    push_large_bhead(&mut blend, b"DNA1", 0, 0x5000, 1, &dna);
+    push_large_bhead(&mut blend, b"ENDB", 0, 0, 0, &[]);
+
+    let rep = open_bytes("scene_layers.blend", &blend, None);
+    assert_eq!(rep.detected.id, "blend");
+    match rep.viewer {
+        ViewerPayload::Mesh3d {
+            triangle_count,
+            layers,
+            materials,
+            textures,
+            ..
+        } => {
+            assert_eq!(triangle_count, 2, "2 Object instances of 1 tri = 2 triangles");
+            assert_eq!(layers.len(), 2, "Expected 2 Object layers, got {layers:?}");
+            assert!(layers[0].visible);
+            assert!(!layers[1].visible);
+            assert!(!materials.is_empty(), "Expected Material extracted");
+            assert!(!textures.is_empty(), "Expected packed Image texture extracted");
+        }
+        other => panic!("Expected Blender multi-layer Mesh3d, got {other:?}"),
+    }
+}
+
+#[test]
+fn decodes_avif_and_ora_kra_modern_images() {
+    fn box4(ty: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let len = (8 + body.len()) as u32;
+        let mut v = len.to_be_bytes().to_vec();
+        v.extend_from_slice(ty);
+        v.extend_from_slice(body);
+        v
+    }
+    let ftyp = box4(b"ftyp", b"avif\0\0\0\0avifmif1miaf");
+    let mut ispe_body = vec![0u8; 12];
+    ispe_body[4..8].copy_from_slice(&4u32.to_be_bytes());
+    ispe_body[8..12].copy_from_slice(&3u32.to_be_bytes());
+    let ispe = box4(b"ispe", &ispe_body);
+    let ipco = box4(b"ipco", &ispe);
+    let iprp = box4(b"iprp", &ipco);
+    let mut meta_body = vec![0u8; 4]; // FullBox version/flags
+    meta_body.extend_from_slice(&iprp);
+    let meta = box4(b"meta", &meta_body);
+    let mut avif = ftyp;
+    avif.extend_from_slice(&meta);
+
+    let rep_avif = open_bytes("photo.avif", &avif, None);
+    assert_eq!(rep_avif.detected.id, "avif");
+    match rep_avif.viewer {
+        ViewerPayload::Image { width, height, data_url, .. } => {
+            assert_eq!((width, height), (4, 3));
+            assert!(data_url.starts_with("data:image/"));
+        }
+        other => panic!("Expected AVIF Image payload, got {other:?}"),
+    }
+
+    // OpenRaster (.ora)
+    let mut ora_buf = Vec::new();
+    {
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut ora_buf));
+        let opts = zip::write::SimpleFileOptions::default();
+        zw.start_file("mimetype", opts).unwrap();
+        zw.write_all(b"image/openraster").unwrap();
+        zw.start_file("stack.xml", opts).unwrap();
+        zw.write_all(
+            br#"<?xml version='1.0' encoding='UTF-8'?>
+<image w="8" h="8">
+  <stack>
+    <layer name="HiddenInk" src="data/l1.png" visibility="hidden" opacity="0.5" x="1" y="1" />
+    <layer name="BaseFill" src="data/l0.png" visibility="visible" opacity="1.0" x="0" y="0" />
+  </stack>
+</image>"#,
+        ).unwrap();
+        zw.start_file("data/l0.png", opts).unwrap();
+        zw.write_all(&make_png_bytes(8, 8, [10, 40, 200, 255])).unwrap();
+        zw.start_file("data/l1.png", opts).unwrap();
+        zw.write_all(&make_png_bytes(4, 4, [240, 20, 20, 255])).unwrap();
+        zw.start_file("mergedimage.png", opts).unwrap();
+        zw.write_all(&make_png_bytes(8, 8, [10, 40, 200, 255])).unwrap();
+        zw.finish().unwrap();
+    }
+    let rep_ora = open_bytes("painting.ora", &ora_buf, None);
+    assert_eq!(rep_ora.detected.id, "ora");
+    match rep_ora.viewer {
+        ViewerPayload::LayeredDesign { pages, .. } => {
+            assert_eq!(pages.len(), 1);
+            assert_eq!(pages[0].layers.len(), 2);
+            assert!(pages[0].composite_data_url.is_some());
+        }
+        other => panic!("Expected LayeredDesign for ORA, got {other:?}"),
+    }
+
+    // Krita (.kra)
+    let mut kra_buf = Vec::new();
+    {
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut kra_buf));
+        let opts = zip::write::SimpleFileOptions::default();
+        zw.start_file("mimetype", opts).unwrap();
+        zw.write_all(b"application/x-krita").unwrap();
+        zw.start_file("maindoc.xml", opts).unwrap();
+        zw.write_all(
+            br#"<DOC><IMAGE width="6" height="6"><layers><layer name="Paint" visible="1" opacity="255" /></layers></IMAGE></DOC>"#,
+        ).unwrap();
+        zw.start_file("mergedimage.png", opts).unwrap();
+        zw.write_all(&make_png_bytes(6, 6, [80, 200, 120, 255])).unwrap();
+        zw.finish().unwrap();
+    }
+    let rep_kra = open_bytes("artwork.kra", &kra_buf, None);
+    assert_eq!(rep_kra.detected.id, "kra");
+    match rep_kra.viewer {
+        ViewerPayload::LayeredDesign { pages, .. } => {
+            assert_eq!(pages.len(), 1);
+            assert!(pages[0].composite_data_url.is_some());
+        }
+        other => panic!("Expected LayeredDesign for KRA, got {other:?}"),
+    }
+}
+
+#[test]
+fn decodes_psd_figcraft_vectorcraft_pcraft_and_xfig_pages_and_layers() {
+    // 1. Minimal 2x2 RGBA PSD with 2 Raw layers (one visible, one hidden) + merged image
+    let mut psd = Vec::new();
+    psd.extend_from_slice(b"8BPS");
+    psd.extend_from_slice(&1u16.to_be_bytes()); // v1 PSD
+    psd.extend_from_slice(&[0u8; 6]);
+    psd.extend_from_slice(&4u16.to_be_bytes()); // 4 RGBA channels
+    psd.extend_from_slice(&2u32.to_be_bytes()); // height = 2
+    psd.extend_from_slice(&2u32.to_be_bytes()); // width = 2
+    psd.extend_from_slice(&8u16.to_be_bytes()); // 8 bits
+    psd.extend_from_slice(&3u16.to_be_bytes()); // RGB mode
+    psd.extend_from_slice(&0u32.to_be_bytes()); // ColorModeData len
+    psd.extend_from_slice(&0u32.to_be_bytes()); // ImageResources len
+
+    let mut layer_info = Vec::new();
+    layer_info.extend_from_slice(&2i16.to_be_bytes()); // 2 layers
+    for (name, flags) in [(&b"\x02Bg"[..], 0x00u8), (&b"\x03Top"[..], 0x02u8)] {
+        layer_info.extend_from_slice(&0i32.to_be_bytes()); // top
+        layer_info.extend_from_slice(&0i32.to_be_bytes()); // left
+        layer_info.extend_from_slice(&2i32.to_be_bytes()); // bottom
+        layer_info.extend_from_slice(&2i32.to_be_bytes()); // right
+        layer_info.extend_from_slice(&4u16.to_be_bytes()); // 4 channels
+        for cid in [-1i16, 0, 1, 2] {
+            layer_info.extend_from_slice(&cid.to_be_bytes());
+            layer_info.extend_from_slice(&6u32.to_be_bytes()); // 2 byte comp + 4 pixel bytes
+        }
+        layer_info.extend_from_slice(b"8BIMnorm");
+        layer_info.push(255); // opacity
+        layer_info.push(0); // clipping
+        layer_info.push(flags);
+        layer_info.push(0); // filler
+        let mut nm_padded = name.to_vec();
+        while nm_padded.len() % 4 != 0 { nm_padded.push(0); }
+        let extra_len = 4 + 4 + nm_padded.len();
+        layer_info.extend_from_slice(&(extra_len as u32).to_be_bytes());
+        layer_info.extend_from_slice(&0u32.to_be_bytes()); // mask data
+        layer_info.extend_from_slice(&0u32.to_be_bytes()); // blending ranges
+        layer_info.extend_from_slice(&nm_padded);
+    }
+    // Channel pixel data for both layers (each 4 channels * 6 bytes Raw RGBA 2x2)
+    for val in [[255u8, 0, 0, 255], [255, 255, 255, 128]] {
+        for ch_byte in [val[3], val[0], val[1], val[2]] {
+            layer_info.extend_from_slice(&0u16.to_be_bytes()); // Raw
+            layer_info.extend_from_slice(&[ch_byte; 4]);
+        }
+    }
+    if layer_info.len() % 2 != 0 { layer_info.push(0); }
+    let lmi_len = 4 + layer_info.len();
+    psd.extend_from_slice(&(lmi_len as u32).to_be_bytes());
+    psd.extend_from_slice(&(layer_info.len() as u32).to_be_bytes());
+    psd.extend_from_slice(&layer_info);
+    // Merged ImageData section: Raw compression + 4 planes * 4 bytes
+    psd.extend_from_slice(&0u16.to_be_bytes());
+    psd.extend_from_slice(&[200u8; 16]);
+
+    let rep_psd = open_bytes("layered.psd", &psd, None);
+    assert_eq!(rep_psd.detected.id, "psd");
+    match rep_psd.viewer {
+        ViewerPayload::LayeredDesign { pages, .. } => {
+            assert_eq!(pages.len(), 1);
+            assert_eq!(pages[0].layers.len(), 2);
+            // PSD layer decoder emits UI panel top-to-bottom order
+            assert_eq!(pages[0].layers[0].name, "Top");
+            assert!(!pages[0].layers[0].visible);
+            assert_eq!(pages[0].layers[1].name, "Bg");
+            assert!(pages[0].layers[1].visible);
+            assert!(pages[0].layers[0].image_data_url.is_some());
+            assert!(pages[0].layers[1].image_data_url.is_some());
+            assert!(pages[0].composite_data_url.is_some());
+        }
+        other => panic!("Expected PSD LayeredDesign, got {other:?}"),
+    }
+
+    // 2. Multi-page .figcraft ZIP
+    let mut fc_buf = Vec::new();
+    {
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut fc_buf));
+        let opts = zip::write::SimpleFileOptions::default();
+        zw.start_file("document.json", opts).unwrap();
+        let doc = serde_json::json!({
+            "document": {
+                "pages": [
+                    {
+                        "name": "Home",
+                        "width": 800.0,
+                        "height": 600.0,
+                        "children": [
+                            { "name": "Card", "kind": { "type": "rect", "fill": "#224488" }, "x": 20.0, "y": 20.0, "width": 200.0, "height": 120.0, "visible": true }
+                        ]
+                    },
+                    {
+                        "name": "Settings",
+                        "width": 800.0,
+                        "height": 600.0,
+                        "children": [
+                            { "name": "Toggle", "kind": { "type": "ellipse", "fill": "#eaffff" }, "x": 40.0, "y": 40.0, "width": 60.0, "height": 60.0, "visible": false }
+                        ]
+                    }
+                ]
+            }
+        });
+        zw.write_all(doc.to_string().as_bytes()).unwrap();
+        zw.start_file("thumbnail.png", opts).unwrap();
+        zw.write_all(&make_png_bytes(4, 4, [20, 40, 80, 255])).unwrap();
+        zw.finish().unwrap();
+    }
+    let rep_fc = open_bytes("app_ui.figcraft", &fc_buf, None);
+    assert_eq!(rep_fc.detected.id, "figcraft");
+    match rep_fc.viewer {
+        ViewerPayload::LayeredDesign { pages, .. } => {
+            assert_eq!(pages.len(), 2);
+            assert_eq!(pages[0].name, "Home");
+            assert_eq!(pages[1].name, "Settings");
+            assert!(pages[0].layers.iter().any(|l| l.svg_fragment.is_some()));
+            assert!(!pages[1].layers[0].visible);
+        }
+        other => panic!("Expected FigCraft LayeredDesign, got {other:?}"),
+    }
+
+    // 3. Multi-artboard .vectorcraft JSON
+    let vc_json = serde_json::json!({
+        "document": {
+            "artboards": [
+                { "name": "Board A", "bounds": { "x": 0.0, "y": 0.0, "width": 400.0, "height": 300.0 } },
+                { "name": "Board B", "bounds": { "x": 500.0, "y": 0.0, "width": 400.0, "height": 300.0 } }
+            ],
+            "layers": [
+                { "name": "Badge", "visible": true, "x": 10.0, "y": 10.0, "width": 100.0, "height": 50.0, "shape": { "kind": "rect", "fill": "#ffaa00" } }
+            ]
+        }
+    });
+    let rep_vc = open_bytes("poster.vectorcraft", vc_json.to_string().as_bytes(), None);
+    assert_eq!(rep_vc.detected.id, "vectorcraft");
+    match rep_vc.viewer {
+        ViewerPayload::LayeredDesign { pages, .. } => {
+            assert_eq!(pages.len(), 2);
+            assert_eq!(pages[0].name, "Board A");
+            assert_eq!(pages[1].name, "Board B");
+        }
+        other => panic!("Expected VectorCraft LayeredDesign, got {other:?}"),
+    }
+
+    // 4. Sparse-tiled .pcraft ZIP
+    let tile_raw = vec![120u8; 256 * 256 * 4];
+    let tile_zst = wrap_zstd_raw_frame(&tile_raw);
+    let mut pc_buf = Vec::new();
+    {
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut pc_buf));
+        let opts = zip::write::SimpleFileOptions::default();
+        zw.start_file("manifest.json", opts).unwrap();
+        let manifest = serde_json::json!({
+            "document": {
+                "name": "Poster",
+                "size": { "width": 64, "height": 64 },
+                "layers": [
+                    {
+                        "name": "PaintLayer",
+                        "visible": true,
+                        "opacity": 1.0,
+                        "blend": "normal",
+                        "content": {
+                            "kind": "raster",
+                            "surface": { "tiles": [ { "tx": 0, "ty": 0, "hash": "tile0" } ] }
+                        }
+                    }
+                ]
+            }
+        });
+        zw.write_all(manifest.to_string().as_bytes()).unwrap();
+        zw.start_file("tiles/tile0.zst", opts).unwrap();
+        zw.write_all(&tile_zst).unwrap();
+        zw.finish().unwrap();
+    }
+    let rep_pc = open_bytes("canvas.pcraft", &pc_buf, None);
+    assert_eq!(rep_pc.detected.id, "pcraft");
+    match rep_pc.viewer {
+        ViewerPayload::LayeredDesign { pages, .. } => {
+            assert_eq!(pages.len(), 1);
+            assert_eq!(pages[0].layers.len(), 1);
+            assert!(pages[0].layers[0].image_data_url.as_deref().unwrap_or("").starts_with("data:image/png;base64,"));
+        }
+        other => panic!("Expected PhotoCraft LayeredDesign, got {other:?}"),
+    }
+
+    // 5. Xfig ASCII .fig
+    let xfig = b"#FIG 3.2\nPortrait\nCenter\nInches\nLetter\n100.00\nSingle\n-2\n1200 2\n2 1 0 1 0 7 50 -1 -1 0.0 0 0 -1 0 0 3\n\t 0 0 1500 0 1500 1500\n";
+    let rep_fig = open_bytes("diagram.fig", xfig, None);
+    assert_eq!(rep_fig.detected.id, "fig");
+    match rep_fig.viewer {
+        ViewerPayload::LayeredDesign { pages, .. } => {
+            assert!(!pages.is_empty());
+            assert!(pages[0].layers.iter().any(|l| l.svg_fragment.is_some()));
+        }
+        other => panic!("Expected Xfig LayeredDesign, got {other:?}"),
+    }
+}

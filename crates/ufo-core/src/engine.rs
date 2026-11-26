@@ -1,5 +1,5 @@
 use crate::decoders::{
-    archive, data, document, font, hex_bin, image, media, mesh3d, text,
+    archive, data, design, document, font, hex_bin, image, media, mesh3d, text,
 };
 use crate::magic::{compute_hashes, looks_like_text, sniff_format};
 use crate::model::{
@@ -75,12 +75,23 @@ fn dispatch_viewer(
 ) -> ViewerPayload {
     let id = detected.id.as_str();
 
-    // 1. SVG / Raster Images / Camera RAW / PSD / EXR
+    // 0. Layered Design & Multi-Page Projects (.psd, .psb, .fig, .figcraft, .vectorcraft, .pcraft, .ora, .kra)
+    if matches!(
+        id,
+        "psd" | "psb" | "fig" | "figcraft" | "vectorcraft" | "pcraft" | "photocraft" | "ora" | "kra"
+    ) {
+        if let Some(v) = design::decode_design(bytes, id, metadata) {
+            return v;
+        }
+    }
+
+    // 1. SVG / Raster Images / Camera RAW / PSD / EXR / AVIF / HEIC / JXL / JP2
     if matches!(
         id,
         "svg" | "svgz" | "png" | "jpg" | "jpeg" | "jpe" | "jfif" | "webp" | "gif" | "bmp" | "dib"
             | "tif" | "tiff" | "ico" | "cur" | "tga" | "icb" | "pcx" | "ppm" | "pgm" | "pbm"
             | "pnm" | "pam" | "qoi" | "exr" | "hdr" | "dds" | "xpm" | "psd" | "psb" | "icns"
+            | "avif" | "heic" | "heif" | "jxl" | "jp2" | "j2k" | "kra" | "ora"
             | "cr2" | "cr3" | "nef" | "arw" | "dng" | "orf" | "rw2" | "raf" | "pef" | "srw"
             | "3fr"
     ) {
@@ -103,7 +114,8 @@ fn dispatch_viewer(
             | "iges" | "igs" | "3dm" | "fcstd" | "fcstd1" | "blend" | "gcode" | "gco"
             | "nc" | "ngc" | "tap" | "cnc" | "dxf" | "pcd" | "pts" | "xyz"
             | "gerber" | "gbr" | "gbx" | "gtl" | "gbl" | "gts" | "gbs" | "gto" | "gbo"
-            | "kicad_pcb" | "kicad_sch" | "kicad_mod" | "fbx"
+            | "kicad_pcb" | "kicad_sch" | "kicad_mod" | "fbx" | "bvh" | "usd" | "usda" | "usdc"
+            | "usdz"
     ) {
         if let Some(v) = mesh3d::decode_3d_or_cad(bytes, id, metadata) {
             return v;

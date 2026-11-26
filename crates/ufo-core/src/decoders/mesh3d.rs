@@ -3,10 +3,7 @@ use std::fmt::Write as _;
 use std::io::{Cursor, Read as _};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use cadmpeg_codec_freecad::FcstdCodec;
-use cadmpeg_codec_rhino::RhinoCodec;
-use cadmpeg_codec_step::StepCodec;
-use cadmpeg_ir::codec::{Codec as _, DecodeOptions};
+use cadmpeg_ir::codec::DecodeOptions;
 use cadmpeg_ir::eval::{
     admission::EvaluationAdmission, analytic_surface_parameters, model_curve_point_by_id,
     model_surface_partials_by_id,
@@ -15,10 +12,17 @@ use cadmpeg_ir::geometry::SolvedSurfaceGeometry;
 use cadmpeg_ir::index::ModelIndex;
 use cadmpeg_ir::topology::Sense;
 use cadmpeg_ir::CadIr;
+use cadmpeg_registry::InputCatalog;
+use solidcore_ops::pcurve::{pcurves_within, EdgeUse, TrimFace, Trims};
+use solidcore_record::brep::Curve2;
+use solidcore_tess::MeshTolerance;
 
 use crate::decoders::blend;
 use crate::decoders::text::decode_to_utf8;
-use crate::model::{MeshBatch, MetadataEntry, TreeNode, ViewerPayload};
+use crate::model::{
+    MeshBatch, MetadataEntry, SceneLayer3d, SceneMaterialInfo, SkeletonAnimation, TreeNode,
+    ViewerPayload,
+};
 
 const MAX_RENDER_TRIS: usize = 300_000;
 const MAX_RENDER_POINTS: usize = 450_000;
@@ -37,10 +41,16 @@ pub fn decode_3d_or_cad(
         "pcd" | "pts" | "xyz" => decode_point_cloud_text(bytes, format_id, metadata),
         "glb" | "gltf" => decode_gltf(bytes, metadata),
         "3mf" => decode_3mf(bytes, metadata),
-        "step" | "stp" | "ifc" => decode_cadmpeg_step(bytes, format_id, metadata),
-        "iges" | "igs" => decode_iges(bytes, metadata),
-        "3dm" => decode_cadmpeg_rhino(bytes, metadata),
-        "fcstd" | "fcstd1" => decode_cadmpeg_freecad(bytes, metadata),
+        "step" | "stp" | "ifc" => decode_solidcore_step(bytes, format_id, metadata),
+        "iges" | "igs" => decode_cadir_solidcore(bytes, "iges", "IGES CAD (Solidcore)", metadata)
+            .or_else(|| decode_iges(bytes, metadata)),
+        "3dm" => decode_cadir_solidcore(bytes, "3dm", "McNeel Rhino 3DM CAD (Solidcore)", metadata),
+        "fcstd" | "fcstd1" => {
+            decode_cadir_solidcore(bytes, "fcstd", "FreeCAD FCStd CAD (Solidcore)", metadata)
+        }
+        "usd" | "usda" | "usdc" | "usdz" => {
+            decode_cadir_solidcore(bytes, format_id, "OpenUSD 3D / CAD Scene", metadata)
+        }
         "blend" => decode_blend(bytes, metadata),
         "gcode" | "gco" | "nc" | "ngc" | "tap" | "cnc" => decode_gcode(bytes, metadata),
         "dxf" => decode_dxf(bytes, metadata),
@@ -48,7 +58,9 @@ pub fn decode_3d_or_cad(
             decode_gerber(bytes, metadata)
         }
         "kicad_pcb" | "kicad_sch" | "kicad_mod" => decode_kicad(bytes, format_id, metadata),
-        "fbx" => decode_fbx_summary(bytes, metadata),
+        "fbx" => crate::decoders::anim::decode_fbx_animation(bytes, metadata)
+            .or_else(|| decode_fbx_summary(bytes, metadata)),
+        "bvh" => crate::decoders::anim::decode_bvh(bytes, metadata),
         _ => None,
     }
 }
@@ -65,24 +77,27 @@ fn f32_slice_to_b64(slice: &[f32]) -> String {
 }
 
 #[derive(Default)]
-struct MeshBuild {
-    format_label: String,
-    positions: Vec<f32>,
-    normals: Vec<f32>,
-    uvs: Vec<f32>,
-    colors: Vec<f32>,
-    wireframe_lines: Vec<f32>,
-    point_positions: Vec<f32>,
-    point_colors: Vec<f32>,
-    textures: Vec<String>,
-    batches: Vec<MeshBatch>,
-    parts: Vec<String>,
-    cad_summary: Option<String>,
-    is_gaussian_splat: bool,
+pub(crate) struct MeshBuild {
+    pub(crate) format_label: String,
+    pub(crate) positions: Vec<f32>,
+    pub(crate) normals: Vec<f32>,
+    pub(crate) uvs: Vec<f32>,
+    pub(crate) colors: Vec<f32>,
+    pub(crate) wireframe_lines: Vec<f32>,
+    pub(crate) point_positions: Vec<f32>,
+    pub(crate) point_colors: Vec<f32>,
+    pub(crate) textures: Vec<String>,
+    pub(crate) batches: Vec<MeshBatch>,
+    pub(crate) parts: Vec<String>,
+    pub(crate) cad_summary: Option<String>,
+    pub(crate) is_gaussian_splat: bool,
+    pub(crate) layers: Vec<SceneLayer3d>,
+    pub(crate) materials: Vec<SceneMaterialInfo>,
+    pub(crate) skeleton: Option<SkeletonAnimation>,
 }
 
 impl MeshBuild {
-    fn finalize(mut self) -> ViewerPayload {
+    pub(crate) fn finalize(mut self) -> ViewerPayload {
         let tri_count = self.positions.len() / 9;
         let vert_count = self.positions.len() / 3;
         let point_count = self.point_positions.len() / 3;
@@ -106,8 +121,14 @@ impl MeshBuild {
             }
         }
         if !bmin[0].is_finite() {
-            bmin = [-1.0, -1.0, -1.0];
-            bmax = [1.0, 1.0, 1.0];
+            if let Some(skel) = &self.skeleton {
+                let (sbmin, sbmax) = compute_skeleton_bounds(skel);
+                bmin = sbmin;
+                bmax = sbmax;
+            } else {
+                bmin = [-1.0, -1.0, -1.0];
+                bmax = [1.0, 1.0, 1.0];
+            }
         }
 
         ViewerPayload::Mesh3d {
@@ -130,8 +151,46 @@ impl MeshBuild {
             batches: self.batches,
             parts: self.parts,
             cad_summary: self.cad_summary,
+            layers: self.layers,
+            materials: self.materials,
+            skeleton: self.skeleton,
         }
     }
+}
+
+fn compute_skeleton_bounds(skel: &SkeletonAnimation) -> ([f32; 3], [f32; 3]) {
+    if skel.bones.is_empty() {
+        return ([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]);
+    }
+    let mut world_pos = vec![[0.0f32; 3]; skel.bones.len()];
+    let mut bmin = [f32::INFINITY; 3];
+    let mut bmax = [f32::NEG_INFINITY; 3];
+    for (i, b) in skel.bones.iter().enumerate() {
+        let p = match b.parent {
+            Some(pi) if pi < i => [
+                world_pos[pi][0] + b.rest_local_pos[0],
+                world_pos[pi][1] + b.rest_local_pos[1],
+                world_pos[pi][2] + b.rest_local_pos[2],
+            ],
+            _ => b.rest_local_pos,
+        };
+        world_pos[i] = p;
+        for k in 0..3 {
+            if p[k].is_finite() {
+                bmin[k] = bmin[k].min(p[k]);
+                bmax[k] = bmax[k].max(p[k]);
+            }
+        }
+    }
+    if !bmin[0].is_finite() {
+        return ([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]);
+    }
+    for k in 0..3 {
+        let pad = ((bmax[k] - bmin[k]) * 0.15).max(0.1);
+        bmin[k] -= pad;
+        bmax[k] += pad;
+    }
+    (bmin, bmax)
 }
 
 fn finalize_mesh(
@@ -972,11 +1031,43 @@ fn decode_gltf(bytes: &[u8], metadata: &mut Vec<MetadataEntry>) -> Option<Viewer
 
                 let end_v = (build.positions.len() / 3) as u32;
                 if end_v > start_v {
+                    let bi = build.batches.len();
+                    let mat_name = prim
+                        .material()
+                        .name()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("Material_{bi}"));
+                    build.materials.push(SceneMaterialInfo {
+                        name: mat_name.clone(),
+                        base_color,
+                        metallic: prim.material().pbr_metallic_roughness().metallic_factor(),
+                        roughness: prim.material().pbr_metallic_roughness().roughness_factor(),
+                        texture_name: tex_idx.map(|ti| format!("Texture #{ti}")),
+                        texture_index: tex_idx,
+                    });
                     build.batches.push(MeshBatch {
                         start_vertex: start_v,
                         vertex_count: end_v - start_v,
                         base_color,
                         texture_index: tex_idx,
+                    });
+                    let layer_name = node
+                        .name()
+                        .or_else(|| mesh.name())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("Mesh Layer {}", build.layers.len() + 1));
+                    let vcnt = (end_v - start_v) as usize;
+                    build.layers.push(SceneLayer3d {
+                        id: format!("gltf_layer_{bi}"),
+                        name: layer_name,
+                        kind: "glTF Mesh".into(),
+                        visible: true,
+                        parent_id: None,
+                        material_names: vec![mat_name],
+                        texture_names: tex_idx.map(|ti| vec![format!("Texture #{ti}")]).unwrap_or_default(),
+                        vertex_count: vcnt,
+                        triangle_count: vcnt / 3,
+                        batch_indices: vec![bi],
                     });
                 }
             }
@@ -993,6 +1084,10 @@ fn decode_gltf(bytes: &[u8], metadata: &mut Vec<MetadataEntry>) -> Option<Viewer
         }
     }
 
+    build.skeleton = crate::decoders::anim::extract_gltf_skeleton(doc, &buffers);
+    if let Some(ref skel) = build.skeleton {
+        metadata.push(MetadataEntry { section: "glTF 2.0".into(), key: "Skeleton / Clips".into(), value: format!("{} bones / {} clips", skel.bones.len(), skel.clips.len()) });
+    }
     metadata.push(MetadataEntry { section: "glTF 2.0".into(), key: "Meshes".into(), value: doc.meshes().count().to_string() });
     metadata.push(MetadataEntry { section: "glTF 2.0".into(), key: "Textures".into(), value: build.textures.iter().filter(|s| !s.is_empty()).count().to_string() });
     metadata.push(MetadataEntry { section: "glTF 2.0".into(), key: "Triangles".into(), value: (build.positions.len() / 9).to_string() });
@@ -1032,33 +1127,415 @@ fn decode_3mf(bytes: &[u8], metadata: &mut Vec<MetadataEntry>) -> Option<ViewerP
     Some(finalize_mesh("3D Manufacturing Format (.3mf)".into(), positions, Vec::new(), Vec::new(), Vec::new(), None))
 }
 
-fn decode_cadmpeg_step(bytes: &[u8], format_id: &str, metadata: &mut Vec<MetadataEntry>) -> Option<ViewerPayload> {
+struct SolidcoreTrims;
+
+impl Trims for SolidcoreTrims {
+    fn trims(
+        &self,
+        face: &TrimFace<'_>,
+    ) -> Result<Vec<Vec<Curve2>>, String> {
+        let mut loops = Vec::with_capacity(face.loops.len());
+        for lp in &face.loops {
+            let mut uses = Vec::with_capacity(lp.len());
+            for u in lp {
+                let edge = face
+                    .edges
+                    .get(u.edge as usize)
+                    .ok_or_else(|| format!("missing trim edge {}", u.edge))?;
+                uses.push(EdgeUse {
+                    edge: u.edge,
+                    curve: edge.curve,
+                    interval: edge.interval,
+                    forward: u.forward,
+                    tolerance: edge.tolerance.max(face.tolerance),
+                    given: u.pcurve.as_ref(),
+                });
+            }
+            loops.push(uses);
+        }
+        pcurves_within(face.surface, &loops, face.tolerance, Some(face.domain))
+            .or_else(|_| pcurves_within(face.surface, &loops, face.tolerance, None))
+            .map_err(|e| e.to_string())
+    }
+}
+
+struct SolidcoreBodyItem<'a> {
+    name: String,
+    solid: &'a solidcore_step::assembly::Solid,
+    placement: Option<[[f64; 4]; 4]>,
+    visible: bool,
+    color: [f32; 4],
+}
+
+const CAD_BODY_PALETTE: [[f32; 4]; 8] = [
+    [0.78, 0.88, 0.94, 1.0],
+    [0.64, 0.82, 0.92, 1.0],
+    [0.84, 0.86, 0.72, 1.0],
+    [0.70, 0.88, 0.80, 1.0],
+    [0.88, 0.78, 0.72, 1.0],
+    [0.76, 0.78, 0.92, 1.0],
+    [0.90, 0.84, 0.66, 1.0],
+    [0.72, 0.86, 0.88, 1.0],
+];
+
+fn brep_diag_size(brep: &solidcore_record::brep::Brep) -> f64 {
+    let mut bmin = [f64::INFINITY; 3];
+    let mut bmax = [f64::NEG_INFINITY; 3];
+    for v in &brep.vertices {
+        for k in 0..3 {
+            if v.point[k].is_finite() {
+                bmin[k] = bmin[k].min(v.point[k]);
+                bmax[k] = bmax[k].max(v.point[k]);
+            }
+        }
+    }
+    if !bmin[0].is_finite() {
+        return 100.0;
+    }
+    let dx = bmax[0] - bmin[0];
+    let dy = bmax[1] - bmin[1];
+    let dz = bmax[2] - bmin[2];
+    (dx * dx + dy * dy + dz * dz).sqrt().max(1.0)
+}
+
+#[inline]
+fn xform_pos_col_major(m: &[[f64; 4]; 4], p: solidcore_record::Vec3) -> [f32; 3] {
+    let x = m[0][0] * p.x + m[1][0] * p.y + m[2][0] * p.z + m[3][0];
+    let y = m[0][1] * p.x + m[1][1] * p.y + m[2][1] * p.z + m[3][1];
+    let z = m[0][2] * p.x + m[1][2] * p.y + m[2][2] * p.z + m[3][2];
+    [x as f32, y as f32, z as f32]
+}
+
+#[inline]
+fn xform_norm_col_major(m: &[[f64; 4]; 4], n: solidcore_record::Vec3) -> [f32; 3] {
+    let x = m[0][0] * n.x + m[1][0] * n.y + m[2][0] * n.z;
+    let y = m[0][1] * n.x + m[1][1] * n.y + m[2][1] * n.z;
+    let z = m[0][2] * n.x + m[1][2] * n.y + m[2][2] * n.z;
+    let len = (x * x + y * y + z * z).sqrt().max(1e-12);
+    [(x / len) as f32, (y / len) as f32, (z / len) as f32]
+}
+
+fn tessellate_solidcore_items(
+    label: &str,
+    items: &[SolidcoreBodyItem<'_>],
+    kind_label: &str,
+    extra_notes: usize,
+    metadata: &mut Vec<MetadataEntry>,
+) -> Option<ViewerPayload> {
+    let mut build = MeshBuild {
+        format_label: label.into(),
+        ..Default::default()
+    };
+    let mut total_faces = 0usize;
+    let mut refused_faces = 0usize;
+
+    for (idx, item) in items.iter().enumerate() {
+        let size = brep_diag_size(&item.solid.brep);
+        let tol = MeshTolerance::display_of(size);
+        let Ok((plan, _stats)) = solidcore_tess::plan(&item.solid.brep, &tol, size) else {
+            continue;
+        };
+        let (tmesh, refused) = plan.evaluate();
+        total_faces += item.solid.brep.faces.len();
+        refused_faces += refused.len();
+
+        let start_v = (build.positions.len() / 3) as u32;
+        for tri in &tmesh.triangles {
+            if build.positions.len() >= MAX_RENDER_TRIS * 9 {
+                break;
+            }
+            let (Some(p0), Some(p1), Some(p2)) = (
+                tmesh.positions.get(tri[0] as usize).copied(),
+                tmesh.positions.get(tri[1] as usize).copied(),
+                tmesh.positions.get(tri[2] as usize).copied(),
+            ) else {
+                continue;
+            };
+            let (n0, n1, n2) = (
+                tmesh.normals.get(tri[0] as usize).copied().unwrap_or(solidcore_record::Vec3::Z),
+                tmesh.normals.get(tri[1] as usize).copied().unwrap_or(solidcore_record::Vec3::Z),
+                tmesh.normals.get(tri[2] as usize).copied().unwrap_or(solidcore_record::Vec3::Z),
+            );
+            for (p, n) in [(p0, n0), (p1, n1), (p2, n2)] {
+                let pf = match &item.placement {
+                    Some(m) => xform_pos_col_major(m, p),
+                    None => [p.x as f32, p.y as f32, p.z as f32],
+                };
+                let nf = match &item.placement {
+                    Some(m) => xform_norm_col_major(m, n),
+                    None => [n.x as f32, n.y as f32, n.z as f32],
+                };
+                build.positions.extend_from_slice(&pf);
+                build.normals.extend_from_slice(&nf);
+            }
+        }
+
+        for (ei, poly) in tmesh.edges.iter().enumerate() {
+            if !tmesh.edge_visible(ei) || build.wireframe_lines.len() >= 1_200_000 {
+                continue;
+            }
+            for pair in poly.windows(2) {
+                let pa = match &item.placement {
+                    Some(m) => xform_pos_col_major(m, pair[0]),
+                    None => [pair[0].x as f32, pair[0].y as f32, pair[0].z as f32],
+                };
+                let pb = match &item.placement {
+                    Some(m) => xform_pos_col_major(m, pair[1]),
+                    None => [pair[1].x as f32, pair[1].y as f32, pair[1].z as f32],
+                };
+                build.wireframe_lines.extend_from_slice(&pa);
+                build.wireframe_lines.extend_from_slice(&pb);
+            }
+        }
+
+        let end_v = (build.positions.len() / 3) as u32;
+        let vcount = (end_v - start_v) as usize;
+        let mut batch_indices = Vec::new();
+        if vcount > 0 {
+            let batch_idx = build.batches.len();
+            build.batches.push(MeshBatch {
+                start_vertex: start_v,
+                vertex_count: vcount as u32,
+                base_color: item.color,
+                texture_index: None,
+            });
+            batch_indices.push(batch_idx);
+        }
+        build.parts.push(item.name.clone());
+        let mat_name = format!("{} Surface", item.name);
+        build.materials.push(SceneMaterialInfo {
+            name: mat_name.clone(),
+            base_color: item.color,
+            metallic: 0.25,
+            roughness: 0.45,
+            texture_name: None,
+            texture_index: None,
+        });
+        build.layers.push(SceneLayer3d {
+            id: format!("cad_body_{idx}"),
+            name: item.name.clone(),
+            kind: kind_label.into(),
+            visible: item.visible,
+            parent_id: None,
+            material_names: vec![mat_name],
+            texture_names: Vec::new(),
+            vertex_count: vcount,
+            triangle_count: vcount / 3,
+            batch_indices,
+        });
+    }
+
+    if build.positions.is_empty() && build.wireframe_lines.is_empty() {
+        return None;
+    }
+
+    let tri_count = build.positions.len() / 9;
+    metadata.push(MetadataEntry { section: "Solidcore Kernel".into(), key: "Engine".into(), value: "solidcore + solidcore-tess".into() });
+    metadata.push(MetadataEntry { section: "Solidcore Kernel".into(), key: "Bodies / Solids".into(), value: items.len().to_string() });
+    metadata.push(MetadataEntry { section: "Solidcore Kernel".into(), key: "B-Rep Faces".into(), value: total_faces.to_string() });
+    metadata.push(MetadataEntry { section: "Solidcore Kernel".into(), key: "Tessellated Triangles".into(), value: tri_count.to_string() });
+    if refused_faces > 0 || extra_notes > 0 {
+        metadata.push(MetadataEntry { section: "Solidcore Kernel".into(), key: "Refused Faces / Notices".into(), value: format!("{refused_faces} / {extra_notes}") });
+    }
+    build.cad_summary = Some(format!(
+        "Solidcore B-Rep · {} bodies · {} faces · {} tris",
+        items.len(),
+        total_faces,
+        tri_count
+    ));
+    Some(build.finalize())
+}
+
+fn decode_cadmpeg_ir(bytes: &[u8], ext: &str) -> Option<CadIr> {
+    let catalog = InputCatalog::with_builtins();
+    let lower = ext.to_ascii_lowercase();
+    for desc in catalog.descriptors() {
+        if desc.extensions().iter().any(|e| e.eq_ignore_ascii_case(&lower)) {
+            if let Some(codec) = desc.codec() {
+                let mut cursor = Cursor::new(bytes);
+                if let Ok(res) = codec.decode(&mut cursor, &DecodeOptions::default()) {
+                    return Some(res.ir().clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+#[derive(Default)]
+struct FreeCadObjMeta {
+    label: Option<String>,
+    visible: Option<bool>,
+    color: Option<[f32; 4]>,
+}
+
+fn parse_freecad_gui_props(bytes: &[u8]) -> HashMap<String, FreeCadObjMeta> {
+    let mut map: HashMap<String, FreeCadObjMeta> = HashMap::new();
+    let Ok(mut arch) = zip::ZipArchive::new(Cursor::new(bytes)) else {
+        return map;
+    };
+    if let Ok(mut f) = arch.by_name("Document.xml") {
+        let mut xml = String::new();
+        if f.read_to_string(&mut xml).is_ok() {
+            if let Ok(doc) = roxmltree::Document::parse(&xml) {
+                for obj in doc.descendants().filter(|n| n.has_tag_name("Object")) {
+                    let Some(name) = obj.attribute("name") else { continue };
+                    for prop in obj.descendants().filter(|n| n.has_tag_name("Property")) {
+                        if prop.attribute("name") == Some("Label") {
+                            if let Some(s) = prop.descendants().find(|c| c.has_tag_name("String")).and_then(|c| c.attribute("value")) {
+                                map.entry(name.into()).or_default().label = Some(s.into());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(mut f) = arch.by_name("GuiDocument.xml") {
+        let mut xml = String::new();
+        if f.read_to_string(&mut xml).is_ok() {
+            if let Ok(doc) = roxmltree::Document::parse(&xml) {
+                for vp in doc.descendants().filter(|n| n.has_tag_name("ViewProvider")) {
+                    let Some(name) = vp.attribute("name") else { continue };
+                    for prop in vp.descendants().filter(|n| n.has_tag_name("Property")) {
+                        match prop.attribute("name") {
+                            Some("Visibility") => {
+                                if let Some(b) = prop.descendants().find(|c| c.has_tag_name("Bool")).and_then(|c| c.attribute("value")) {
+                                    map.entry(name.into()).or_default().visible = Some(b == "true");
+                                }
+                            }
+                            Some("ShapeColor") => {
+                                if let Some(val_s) = prop.descendants().find(|c| c.has_tag_name("PropertyColor")).and_then(|c| c.attribute("value")) {
+                                    if let Ok(packed) = val_s.parse::<u32>() {
+                                        let r = ((packed >> 24) & 0xFF) as f32 / 255.0;
+                                        let g = ((packed >> 16) & 0xFF) as f32 / 255.0;
+                                        let b = ((packed >> 8) & 0xFF) as f32 / 255.0;
+                                        map.entry(name.into()).or_default().color = Some([r, g, b, 1.0]);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+    map
+}
+
+fn decode_solidcore_step(
+    bytes: &[u8],
+    format_id: &str,
+    metadata: &mut Vec<MetadataEntry>,
+) -> Option<ViewerPayload> {
     if format_id == "ifc" {
         return decode_step_text_fallback(bytes, "IFC BIM Entity Model", metadata);
     }
-    let codec = StepCodec::default();
-    let mut cursor = Cursor::new(bytes);
-    match codec.decode(&mut cursor, &DecodeOptions::default()) {
-        Ok(res) => Some(cad_ir_to_mesh3d("ISO 10303-21 STEP CAD", res.ir(), metadata)),
-        Err(_) => decode_step_text_fallback(bytes, "ISO 10303-21 STEP CAD", metadata),
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        if let Ok(ex) = solidcore_step::p21::parse(text) {
+            let mut solids = solidcore_step::topology::read_solids_with(&ex, &SolidcoreTrims);
+            if solids.solids.is_empty() {
+                solids = solidcore_step::topology::read_solids(&ex);
+            }
+            if !solids.solids.is_empty() {
+                let items: Vec<SolidcoreBodyItem<'_>> = solids
+                    .solids
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, s)| {
+                        let name = if !s.name.trim().is_empty() {
+                            s.name.clone()
+                        } else if let Some(p) = &s.product {
+                            p.clone()
+                        } else {
+                            format!("STEP Solid #{}", s.item)
+                        };
+                        SolidcoreBodyItem {
+                            name,
+                            solid: s,
+                            placement: None,
+                            visible: true,
+                            color: CAD_BODY_PALETTE[idx % CAD_BODY_PALETTE.len()],
+                        }
+                    })
+                    .collect();
+                if let Some(payload) = tessellate_solidcore_items(
+                    "ISO 10303-21 STEP CAD (Solidcore)",
+                    &items,
+                    "STEP Solid",
+                    solids.failures.len(),
+                    metadata,
+                ) {
+                    return Some(payload);
+                }
+            }
+        }
     }
+    decode_cadir_solidcore(bytes, "step", "ISO 10303-21 STEP CAD (Solidcore)", metadata)
+        .or_else(|| decode_step_text_fallback(bytes, "ISO 10303-21 STEP CAD", metadata))
 }
 
-fn decode_cadmpeg_rhino(bytes: &[u8], metadata: &mut Vec<MetadataEntry>) -> Option<ViewerPayload> {
-    let codec = RhinoCodec;
-    let mut cursor = Cursor::new(bytes);
-    let res = codec.decode(&mut cursor, &DecodeOptions::default()).ok()?;
-    Some(cad_ir_to_mesh3d("McNeel Rhino 3DM CAD", res.ir(), metadata))
+fn decode_cadir_solidcore(
+    bytes: &[u8],
+    ext: &str,
+    label: &str,
+    metadata: &mut Vec<MetadataEntry>,
+) -> Option<ViewerPayload> {
+    let ir = decode_cadmpeg_ir(bytes, ext)?;
+    let fc_meta = if ext == "fcstd" || ext == "fcstd1" {
+        parse_freecad_gui_props(bytes)
+    } else {
+        HashMap::new()
+    };
+    let bodies = solidcore_cadir::read_bodies(&ir, Some(&SolidcoreTrims));
+    if !bodies.read.is_empty() {
+        let kind_label = if ext == "fcstd" || ext == "fcstd1" {
+            "FreeCAD Body"
+        } else {
+            "CAD B-Rep Body"
+        };
+        let items: Vec<SolidcoreBodyItem<'_>> = bodies
+            .read
+            .iter()
+            .enumerate()
+            .map(|(idx, b)| {
+                let raw_name = if !b.solid.name.trim().is_empty() {
+                    b.solid.name.as_str()
+                } else {
+                    b.body.as_str()
+                };
+                let meta = fc_meta.get(&b.body).or_else(|| fc_meta.get(raw_name));
+                let display = meta
+                    .and_then(|m| m.label.clone())
+                    .unwrap_or_else(|| raw_name.to_string());
+                let visible = meta.and_then(|m| m.visible).unwrap_or(true);
+                let color = meta
+                    .and_then(|m| m.color)
+                    .unwrap_or(CAD_BODY_PALETTE[idx % CAD_BODY_PALETTE.len()]);
+                SolidcoreBodyItem {
+                    name: display,
+                    solid: &b.solid,
+                    placement: b.placement,
+                    visible,
+                    color,
+                }
+            })
+            .collect();
+        if let Some(payload) = tessellate_solidcore_items(
+            label,
+            &items,
+            kind_label,
+            bodies.failures.len(),
+            metadata,
+        ) {
+            return Some(payload);
+        }
+    }
+    Some(cad_ir_to_mesh3d(label, &ir, metadata))
 }
 
-fn decode_cadmpeg_freecad(bytes: &[u8], metadata: &mut Vec<MetadataEntry>) -> Option<ViewerPayload> {
-    let codec = FcstdCodec;
-    let mut cursor = Cursor::new(bytes);
-    let res = codec.decode(&mut cursor, &DecodeOptions::default()).ok()?;
-    Some(cad_ir_to_mesh3d("FreeCAD FCStd CAD", res.ir(), metadata))
-}
-
-/// Converts CadIr tessellations AND tessellates exact B-rep surfaces/faces into solid 3D triangles + normals!
+/// Fallback converter from CadIr tessellations/surfaces when B-rep conversion has no solid bodies.
 fn cad_ir_to_mesh3d(label: &str, ir: &CadIr, metadata: &mut Vec<MetadataEntry>) -> ViewerPayload {
     let m = &ir.model;
     metadata.push(MetadataEntry { section: "CAD B-Rep".into(), key: "Bodies".into(), value: m.bodies.len().to_string() });
@@ -1069,8 +1546,11 @@ fn cad_ir_to_mesh3d(label: &str, ir: &CadIr, metadata: &mut Vec<MetadataEntry>) 
     let mut positions = Vec::new();
     let mut normals = Vec::new();
     let mut wireframe_lines = Vec::new();
+    let mut batches = Vec::new();
+    let mut layers = Vec::new();
 
-    for tess in &m.tessellations {
+    for (t_idx, tess) in m.tessellations.iter().enumerate() {
+        let start_v = (positions.len() / 3) as u32;
         let verts = tess.vertices();
         let vnorms = tess.vertex_normals();
         for tri in tess.triangles().iter().take(MAX_RENDER_TRIS) {
@@ -1084,6 +1564,35 @@ fn cad_ir_to_mesh3d(label: &str, ir: &CadIr, metadata: &mut Vec<MetadataEntry>) 
                     }
                 }
             }
+        }
+        let end_v = (positions.len() / 3) as u32;
+        let vcount = (end_v - start_v) as usize;
+        if vcount > 0 {
+            let color = CAD_BODY_PALETTE[t_idx % CAD_BODY_PALETTE.len()];
+            let bi = batches.len();
+            batches.push(MeshBatch {
+                start_vertex: start_v,
+                vertex_count: vcount as u32,
+                base_color: color,
+                texture_index: None,
+            });
+            let name = m
+                .bodies
+                .get(t_idx)
+                .and_then(|b| b.name.clone())
+                .unwrap_or_else(|| format!("Mesh Layer {}", t_idx + 1));
+            layers.push(SceneLayer3d {
+                id: format!("cad_mesh_{t_idx}"),
+                name,
+                kind: "CAD Mesh".into(),
+                visible: true,
+                parent_id: None,
+                material_names: Vec::new(),
+                texture_names: Vec::new(),
+                vertex_count: vcount,
+                triangle_count: vcount / 3,
+                batch_indices: vec![bi],
+            });
         }
         for edge in tess.feature_edges().iter().take(80_000) {
             if let (Some(a), Some(b)) = (verts.get(edge[0] as usize), verts.get(edge[1] as usize)) {
@@ -1237,6 +1746,34 @@ fn cad_ir_to_mesh3d(label: &str, ir: &CadIr, metadata: &mut Vec<MetadataEntry>) 
         }
     }
 
+    if !positions.is_empty() && batches.is_empty() {
+        let total_verts = (positions.len() / 3) as u32;
+        batches.push(MeshBatch {
+            start_vertex: 0,
+            vertex_count: total_verts,
+            base_color: CAD_BODY_PALETTE[0],
+            texture_index: None,
+        });
+        let name = m
+            .bodies
+            .first()
+            .and_then(|b| b.name.clone())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "CAD B-Rep Surface".into());
+        layers.push(SceneLayer3d {
+            id: "cad_surface_0".into(),
+            name,
+            kind: "CAD B-Rep Surface".into(),
+            visible: true,
+            parent_id: None,
+            material_names: Vec::new(),
+            texture_names: Vec::new(),
+            vertex_count: total_verts as usize,
+            triangle_count: (total_verts as usize) / 3,
+            batch_indices: vec![0],
+        });
+    }
+
     let parts: Vec<String> = m
         .product_definitions
         .iter()
@@ -1251,7 +1788,18 @@ fn cad_ir_to_mesh3d(label: &str, ir: &CadIr, metadata: &mut Vec<MetadataEntry>) 
         m.edges.len(),
         positions.len() / 9
     );
-    finalize_mesh(label.into(), positions, normals, wireframe_lines, parts, Some(summary))
+    MeshBuild {
+        format_label: label.into(),
+        positions,
+        normals,
+        wireframe_lines,
+        batches,
+        layers,
+        parts,
+        cad_summary: Some(summary),
+        ..Default::default()
+    }
+    .finalize()
 }
 
 fn compute_surface_uv_bounds(
@@ -1450,18 +1998,7 @@ fn decode_iges(bytes: &[u8], metadata: &mut Vec<MetadataEntry>) -> Option<Viewer
 }
 
 fn decode_blend(bytes: &[u8], metadata: &mut Vec<MetadataEntry>) -> Option<ViewerPayload> {
-    let (label, verts, tris, wire, parts, tree_nodes, summary) =
-        blend::decode_blend_info(bytes, metadata)?;
-    Some(blend::blend_to_viewer(
-        label,
-        verts,
-        tris,
-        wire,
-        parts,
-        tree_nodes,
-        summary,
-        finalize_mesh,
-    ))
+    blend::decode_blend_payload(bytes, metadata)
 }
 
 fn decode_gcode(bytes: &[u8], metadata: &mut Vec<MetadataEntry>) -> Option<ViewerPayload> {

@@ -52,6 +52,41 @@ pub fn decode_image(
         }
     }
 
+    // AVIF (pure-Rust AV1 via av1oxide + native container fallback)
+    if format_id == "avif" {
+        if let Some(payload) = decode_avif(bytes, metadata) {
+            return Some(payload);
+        }
+    }
+
+    // JPEG XL (pure-Rust via jxl-oxide)
+    if format_id == "jxl" {
+        if let Some(payload) = decode_jxl(bytes, metadata) {
+            return Some(payload);
+        }
+    }
+
+    // JPEG 2000 (.jp2, .j2k via hayro-jpeg2000)
+    if matches!(format_id, "jp2" | "j2k") {
+        if let Some(payload) = decode_jp2(bytes, metadata) {
+            return Some(payload);
+        }
+    }
+
+    // HEIC / HEIF (ISO-BMFF box inspection + embedded thumbnail or native pass-through)
+    if matches!(format_id, "heic" | "heif") {
+        if let Some(payload) = decode_heif_or_heic(bytes, format_id, metadata) {
+            return Some(payload);
+        }
+    }
+
+    // Krita (.kra) / OpenRaster (.ora) merged composite PNG fallback
+    if matches!(format_id, "kra" | "ora") {
+        if let Some(payload) = decode_zip_merged_png(bytes, format_id, metadata) {
+            return Some(payload);
+        }
+    }
+
     // OpenEXR HDR -> ACES/Reinhard tone-mapped RGBA PNG
     if format_id == "exr" {
         if let Some(payload) = decode_exr(bytes, metadata) {
@@ -584,4 +619,168 @@ fn extract_camera_raw_preview(
         frames: 1,
         note: Some(format!("Extracted embedded full-res preview from {} RAW container", format_id.to_ascii_uppercase())),
     })
+}
+
+fn decode_avif(bytes: &[u8], metadata: &mut Vec<MetadataEntry>) -> Option<ViewerPayload> {
+    let bd_u8 = |b: av1oxide::BitDepth| match b {
+        av1oxide::BitDepth::Eight => 8u8,
+        av1oxide::BitDepth::Ten => 10,
+        av1oxide::BitDepth::Twelve => 12,
+    };
+    let info = av1oxide::avif::parse_info(bytes).ok();
+    if let Some(ref i) = info {
+        let bits = bd_u8(i.bit_depth);
+        metadata.push(MetadataEntry { section: "AVIF".into(), key: "Dimensions".into(), value: format!("{} × {} px", i.width, i.height) });
+        metadata.push(MetadataEntry { section: "AVIF".into(), key: "Bit Depth / Alpha".into(), value: format!("{bits}-bit / {}", if i.has_alpha { "Alpha" } else { "Opaque" }) });
+    }
+    if let Ok(rgba) = av1oxide::avif::decode_rgba8(bytes) {
+        if rgba.width > 0 && rgba.height > 0 {
+            if let Some(png) = encode_rgba_png(rgba.width, rgba.height, &rgba.pixels) {
+                let (bits, ch) = match info {
+                    Some(ref i) => (bd_u8(i.bit_depth), if i.has_alpha { "RGBA (AV1)" } else { "RGB (AV1)" }),
+                    None => (8u8, "RGBA (AV1)"),
+                };
+                if info.is_none() {
+                    metadata.push(MetadataEntry { section: "AVIF".into(), key: "Dimensions".into(), value: format!("{} × {} px", rgba.width, rgba.height) });
+                }
+                return Some(ViewerPayload::Image {
+                    width: rgba.width,
+                    height: rgba.height,
+                    channels: ch.into(),
+                    bit_depth: bits,
+                    data_url: format!("data:image/png;base64,{}", B64.encode(&png)),
+                    frames: 1,
+                    note: Some("Decoded via pure-Rust AV1/AVIF decoder (av1oxide)".into()),
+                });
+            }
+        }
+    }
+    // Fallback to ISO-BMFF header dimensions + native browser AVIF decoding
+    let (w, h, bits, has_alpha) = if let Some(i) = info {
+        (i.width, i.height, bd_u8(i.bit_depth), i.has_alpha)
+    } else if let Some((w, h)) = parse_isobmff_ispe(bytes) {
+        (w, h, 8u8, false)
+    } else {
+        return None;
+    };
+    Some(ViewerPayload::Image {
+        width: w,
+        height: h,
+        channels: if has_alpha { "RGBA (Native AVIF)".into() } else { "RGB (Native AVIF)".into() },
+        bit_depth: bits,
+        data_url: format!("data:image/avif;base64,{}", B64.encode(bytes)),
+        frames: 1,
+        note: Some("Rendered via native AVIF image codec".into()),
+    })
+}
+
+fn decode_jxl(bytes: &[u8], metadata: &mut Vec<MetadataEntry>) -> Option<ViewerPayload> {
+    let dec = jxl_oxide::integration::JxlDecoder::new(Cursor::new(bytes)).ok()?;
+    let dyn_img = image::DynamicImage::from_decoder(dec).ok()?;
+    let (w, h) = dyn_img.dimensions();
+    let rgba = dyn_img.to_rgba8();
+    let png = encode_rgba_png(w, h, &rgba)?;
+    metadata.push(MetadataEntry { section: "JPEG XL".into(), key: "Dimensions".into(), value: format!("{w} × {h} px") });
+    Some(ViewerPayload::Image {
+        width: w,
+        height: h,
+        channels: "RGBA (JPEG XL)".into(),
+        bit_depth: 8,
+        data_url: format!("data:image/png;base64,{}", B64.encode(&png)),
+        frames: 1,
+        note: Some("Decoded via pure-Rust JPEG XL decoder (jxl-oxide)".into()),
+    })
+}
+
+fn decode_jp2(bytes: &[u8], metadata: &mut Vec<MetadataEntry>) -> Option<ViewerPayload> {
+    let img = hayro_jpeg2000::Image::new(bytes, &hayro_jpeg2000::DecodeSettings::default()).ok()?;
+    let bits = img.original_bit_depth();
+    let dyn_img = image::DynamicImage::from_decoder(img).ok()?;
+    let (w, h) = dyn_img.dimensions();
+    let rgba = dyn_img.to_rgba8();
+    let png = encode_rgba_png(w, h, &rgba)?;
+    metadata.push(MetadataEntry { section: "JPEG 2000".into(), key: "Dimensions".into(), value: format!("{w} × {h} px ({bits}-bit)") });
+    Some(ViewerPayload::Image {
+        width: w,
+        height: h,
+        channels: "RGBA (JPEG 2000)".into(),
+        bit_depth: bits.max(8),
+        data_url: format!("data:image/png;base64,{}", B64.encode(&png)),
+        frames: 1,
+        note: Some("Decoded via pure-Rust JPEG 2000 decoder (hayro-jpeg2000)".into()),
+    })
+}
+
+fn decode_heif_or_heic(
+    bytes: &[u8],
+    format_id: &str,
+    metadata: &mut Vec<MetadataEntry>,
+) -> Option<ViewerPayload> {
+    let dims = parse_isobmff_ispe(bytes);
+    if let Some((w, h)) = dims {
+        metadata.push(MetadataEntry { section: "HEIF / HEIC".into(), key: "Canvas Dimensions".into(), value: format!("{w} × {h} px") });
+    }
+    // Check embedded JPEG thumbnail/preview (often inside HEIC EXIF/thumbnail items)
+    if let Some(payload) = extract_camera_raw_preview(bytes, format_id, metadata) {
+        return Some(payload);
+    }
+    let (w, h) = dims?;
+    let mime = if format_id == "heif" { "image/heif" } else { "image/heic" };
+    Some(ViewerPayload::Image {
+        width: w,
+        height: h,
+        channels: "HEVC (Native Container)".into(),
+        bit_depth: 8,
+        data_url: format!("data:{mime};base64,{}", B64.encode(bytes)),
+        frames: 1,
+        note: Some("Passed HEIF/HEIC container to platform codec with parsed ISPE dimensions".into()),
+    })
+}
+
+/// Scans ISO-BMFF boxes (`ispe`) for image spatial extents `(width, height)`.
+fn parse_isobmff_ispe(bytes: &[u8]) -> Option<(u32, u32)> {
+    let limit = bytes.len().min(512 * 1024);
+    for (i, win) in bytes[..limit].windows(4).enumerate() {
+        if win == b"ispe" && i >= 4 && i + 16 <= bytes.len() {
+            let box_sz = u32::from_be_bytes([bytes[i - 4], bytes[i - 3], bytes[i - 2], bytes[i - 1]]);
+            if box_sz >= 20 {
+                let w = u32::from_be_bytes([bytes[i + 8], bytes[i + 9], bytes[i + 10], bytes[i + 11]]);
+                let h = u32::from_be_bytes([bytes[i + 12], bytes[i + 13], bytes[i + 14], bytes[i + 15]]);
+                if (1..=32768).contains(&w) && (1..=32768).contains(&h) {
+                    return Some((w, h));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn decode_zip_merged_png(
+    bytes: &[u8],
+    format_id: &str,
+    metadata: &mut Vec<MetadataEntry>,
+) -> Option<ViewerPayload> {
+    let mut arch = zip::ZipArchive::new(Cursor::new(bytes)).ok()?;
+    for candidate in ["mergedimage.png", "preview.png"] {
+        if let Ok(mut f) = arch.by_name(candidate) {
+            let mut png = Vec::new();
+            if f.read_to_end(&mut png).is_ok() {
+                if let Ok(r) = image::ImageReader::new(Cursor::new(&png)).with_guessed_format() {
+                    if let Ok((w, h)) = r.into_dimensions() {
+                        metadata.push(MetadataEntry { section: format_id.to_ascii_uppercase(), key: "Composite Preview".into(), value: format!("{w} × {h} px ({candidate})") });
+                        return Some(ViewerPayload::Image {
+                            width: w,
+                            height: h,
+                            channels: "RGBA".into(),
+                            bit_depth: 8,
+                            data_url: format!("data:image/png;base64,{}", B64.encode(&png)),
+                            frames: 1,
+                            note: Some(format!("Rendered from {candidate}")),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    None
 }

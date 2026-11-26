@@ -211,6 +211,90 @@ pub struct MeshBatch {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SceneLayer3d {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub visible: bool,
+    pub parent_id: Option<String>,
+    pub material_names: Vec<String>,
+    pub texture_names: Vec<String>,
+    pub vertex_count: usize,
+    pub triangle_count: usize,
+    pub batch_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SceneMaterialInfo {
+    pub name: String,
+    pub base_color: [f32; 4],
+    pub metallic: f32,
+    pub roughness: f32,
+    pub texture_name: Option<String>,
+    pub texture_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkeletonBone {
+    pub id: usize,
+    pub name: String,
+    pub parent: Option<usize>,
+    pub rest_local_pos: [f32; 3],
+    pub rest_local_rot: [f32; 4],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoneChannel {
+    pub bone_index: usize,
+    pub times: Vec<f32>,
+    pub translations: Vec<[f32; 3]>,
+    pub rotations: Vec<[f32; 4]>,
+    pub scales: Vec<[f32; 3]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnimationClip {
+    pub name: String,
+    pub duration_secs: f32,
+    pub channels: Vec<BoneChannel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkeletonAnimation {
+    pub species_hint: Option<String>,
+    pub bones: Vec<SkeletonBone>,
+    pub clips: Vec<AnimationClip>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesignLayer {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub depth: usize,
+    pub visible: bool,
+    pub opacity: f32,
+    pub blend_mode: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub svg_fragment: Option<String>,
+    pub image_data_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesignPage {
+    pub id: String,
+    pub name: String,
+    pub width: f64,
+    pub height: f64,
+    pub background: Option<String>,
+    pub composite_data_url: Option<String>,
+    pub layers: Vec<DesignLayer>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum ViewerPayload {
     Image {
@@ -283,6 +367,18 @@ pub enum ViewerPayload {
         batches: Vec<MeshBatch>,
         parts: Vec<String>,
         cad_summary: Option<String>,
+        #[serde(default)]
+        layers: Vec<SceneLayer3d>,
+        #[serde(default)]
+        materials: Vec<SceneMaterialInfo>,
+        #[serde(default)]
+        skeleton: Option<SkeletonAnimation>,
+    },
+    LayeredDesign {
+        format_label: String,
+        pages: Vec<DesignPage>,
+        active_page: usize,
+        note: Option<String>,
     },
     Vector2d {
         format_label: String,

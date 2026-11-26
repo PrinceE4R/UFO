@@ -25,3 +25,4 @@ ufo-core = { path = "../crates/ufo-core" }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 rfd = "0.17"
+tauri-plugin-single-instance = "2"
