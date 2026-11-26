@@ -1,70 +1,50 @@
 # Universal File Opener (UFO)
 
-A lightning-fast, cross-platform universal file opener built primarily in **Rust** (`ufo-core`, `ufo-wasm`, `ufo-cli`, `src-tauri`), compiling for **Windows, macOS, Linux, Android, iOS, and Web** with a unified responsive UI optimized simultaneously for desktop and mobile.
+![UFO Sighting](UFO-Sighting.png)
+*A mysterious UFO was just spotted hovering over Area 51—and it's ready to open every file on your drive!*
 
-## Architecture
+## What is UFO (here)?
 
-- **`crates/ufo-core`** (100% Pure Rust, zero C dependencies):
-  - **420+ Registered Extensions** across all **23 categories** + **17+ Ambiguous Extension Disambiguation Rules**.
-  - **Magic-Byte & Container Inspection**: Verifies actual headers/containers before trusting extensions (e.g., Wavefront `.obj` vs COFF `.obj`, TypeScript `.ts` vs MPEG-TS, spoofed extensions, ZIP container classification for DOCX/XLSX/PPTX/APK/IPA/EPUB/3MF/FCStd).
-  - **Native Decoders**:
-    - **Raster & Photography**: PNG, JPEG, WebP, GIF, BMP, TIFF, ICO/CUR, ICNS, TGA, PCX, Netpbm, QOI, OpenEXR HDR, Radiance HDR, PSD/PSB, XPM, SVG/SVGZ, and Camera RAW embedded previews (`CR2`, `CR3`, `NEF`, `ARW`, `DNG`, `ORF`, `RW2`, `RAF`, `PEF`, `SRW`, `3FR`).
-    - **3D & CAD**: STL (binary/ASCII), OBJ, PLY, glTF/GLB, 3MF, ISO 10303-21 STEP (`cadmpeg-codec-step`), Rhino 3DM (`cadmpeg-codec-rhino`), FreeCAD FCStd (`cadmpeg-codec-freecad`), DXF, G-Code toolpaths, RS-274X Gerber & KiCad PCB/schematics, FBX node summaries.
-    - **Documents & Office**: PDF (visual + pure-Rust stream text extractor), DOCX, XLSX/XLSM, PPTX, ODT/ODS/ODP, EPUB, FB2, XPS/OXPS, OLE2/CFB (`DOC`, `XLS`, `PPT`, `MSG`, `MSI`), RTF, EML/VCF/ICS.
-    - **Databases & Scientific/AI**: Pure-Rust SQLite 3 B-tree table/row reader, SafeTensors, GGUF, NumPy `.npy`, GeoJSON/GPX/KML map vector SVGs, Parquet footer metadata, CSV/TSV auto-delimiter tables.
-    - **Audio, Video & Subtitles**: WAV (with PCM waveform), MP3 (ID3 + frame telemetry), FLAC (with picture extraction), Ogg/Opus/Vorbis, MP4/MOV/M4A ISO-BMFF box inspection, MKV/WebM EBML inspection, MIDI piano-roll SVG, SRT/VTT/ASS/LRC cues.
-    - **Fonts**: TTF, OTF, TTC, WOFF 1.0/2.0 (`ttf-parser`) glyph outlines & live specimen waterfall.
-    - **Archives & Disk Images**: ZIP, JAR, APK, IPA, TAR, TAR.GZ, TAR.ZST, GZ, ZST, Brotli, ISO-9660, AR/DEB, 7z/RAR headers — with interactive nested file extraction.
-    - **Executables & Universal Fallback**: PE32/PE32+, ELF32/ELF64, Mach-O/Fat, WebAssembly `.wasm`, Android `.dex`, PCAP/PCAPNG, UF2, `.lnk`, `.torrent`, ASN.1 DER, plus paged Hex + ASCII + Strings + Shannon Entropy for any unknown binary.
-- **`crates/ufo-wasm`**: `wasm-bindgen` bindings exposing `ufo-core` to browsers at native-near speed.
-- **`src-tauri`**: Tauri v2 desktop & mobile application using zero-copy `memmap2` file mapping on native paths.
-- **`crates/ufo-cli`**: Fast parallel CLI inspector.
-- **`frontend/`**: Responsive high-contrast `#000000` / `#0F1113` / `#EAFFFF` brutalist UI with bundled Bootstrap Icons and custom WebGL2 3D/CAD viewport.
+UFO (Universal File Opener) is an application that can open any file—just open for now, editing mode later. It can open tons of file formats (most likely haven't tested everything yet) like:
 
-## Compiling for All 6 Targets
+| Category | Supported Formats & Extensions |
+| :--- | :--- |
+| **1. Documents, Text, Notes & E-books** | `.txt`, `.md`, `.markdown`, `.mdx`, `.rst`, `.adoc`, `.asciidoc`, `.rtf`, `.doc`, `.docx`, `.docm`, `.dotx`, `.dotm`, `.odt`, `.fodt`, `.pdf`, `.tex`, `.latex`, `.typ`, `.epub`, `.mobi`, `.azw`, `.azw3`, `.djvu`, `.xps`, `.oxps`, `.pages`, `.wps`, `.abw`, `.log`, `.nfo`, `.wiki`, `.org`, `.chm`, `.hlp`, `.mht`, `.mhtml`, `.webarchive`, `.fb2`, `.cbr`, `.cbz`, `.cb7`, `.cbt`, `.eml`, `.msg`, `.mbox`, `.vcf`, `.ics`, `.ical`, `.vcs` |
+| **2. Raster Images & Photography** | `.png`, `.jpg`, `.jpeg`, `.jpe`, `.jfif`, `.webp`, `.gif`, `.bmp`, `.dib`, `.tif`, `.tiff`, `.heic`, `.heif`, `.avif`, `.jxl`, `.jp2`, `.j2k`, `.psd`, `.psb`, `.xcf`, `.kra`, `.ora`, `.exr`, `.hdr`, `.dds`, `.ktx`, `.ktx2`, `.astc`, `.basis`, `.pvr`, `.tga`, `.icb`, `.pcx`, `.ppm`, `.pgm`, `.pbm`, `.pnm`, `.pam`, `.raw`, `.cr2`, `.cr3`, `.nef`, `.arw`, `.dng`, `.orf`, `.rw2`, `.raf`, `.pef`, `.srw`, `.3fr` |
+| **3. Vector Graphics, Drawing & Design** | `.svg`, `.svgz`, `.ai`, `.eps`, `.ps`, `.cdr`, `.cmx`, `.emf`, `.wmf`, `.fig`, `.sketch`, `.afdesign`, `.afphoto`, `.afpub`, `.xpm`, `.ico`, `.icns`, `.cur`, `.ani` |
+| **4. 3D Models, Meshes, Scenes & Animation** | `.obj`, `.mtl`, `.fbx`, `.glb`, `.gltf`, `.stl`, `.ply`, `.3ds`, `.dae`, `.usd`, `.usda`, `.usdc`, `.usdz`, `.abc`, `.blend`, `.ma`, `.mb`, `.max`, `.c4d`, `.lwo`, `.lws`, `.x3d`, `.wrl`, `.vrml`, `.bvh`, `.md2`, `.md3`, `.md5mesh`, `.smd`, `.vta`, `.iqm`, `.mesh`, `.msh`, `.model`, `.scn`, `.scene`, `.mdd`, `.cache`, `.anim`, `.skeleton`, `.atlas` |
+| **5. CAD, Mechanical Engineering & BIM** | `.step`, `.stp`, `.iges`, `.igs`, `.brep`, `.brp`, `.sat`, `.sab`, `.x_t`, `.x_b`, `.prt`, `.sldprt`, `.sldasm`, `.slddrw`, `.f3d`, `.f3z`, `.3mf`, `.amf`, `.dxf`, `.dwg`, `.dwt`, `.dws`, `.fcstd`, `.fcstd1`, `.scad`, `.skp`, `.rvt`, `.rfa`, `.ifc`, `.ifczip`, `.3dm`, `.gh`, `.jt`, `.eprt`, `.easm`, `.edrw`, `.par`, `.asm`, `.catpart`, `.catproduct`, `.catdrawing`, `.ipt`, `.iam`, `.idw`, `.ipn`, `.las`, `.laz`, `.e57`, `.pts`, `.xyz`, `.pcd` |
+| **6. 3D Printing, CNC & Fabrication** | `.gcode`, `.gco`, `.bgcode`, `.gc`, `.nc`, `.ngc`, `.tap`, `.cnc`, `.sl1`, `.sl2`, `.ctb`, `.photon`, `.pwmo`, `.pwmx`, `.form`, `.fpp`, `.3w`, `.gx`, `.g3d` |
+| **7. Audio, Music & Sound** | `.mp3`, `.wav`, `.wave`, `.flac`, `.ogg`, `.oga`, `.opus`, `.m4a`, `.aac`, `.wma`, `.aiff`, `.aif`, `.alac`, `.ape`, `.wv`, `.amr`, `.mid`, `.midi`, `.kar`, `.dsf`, `.dff`, `.ac3`, `.eac3`, `.dts`, `.caf`, `.voc`, `.au`, `.snd`, `.pcm`, `.mka`, `.mpc`, `.tta`, `.spx`, `.3ga`, `.flp`, `.als`, `.alp`, `.logicx`, `.band`, `.aup`, `.aup3`, `.sesx`, `.ptx`, `.rpp`, `.npr`, `.sf2`, `.sf3`, `.sfz`, `.vst`, `.vst3`, `.aaxplugin`, `.component`, `.preset`, `.fxp`, `.fxb`, `.rex`, `.rx2` |
+| **8. Video, Film, Subtitles & Editing** | `.mp4`, `.m4v`, `.mkv`, `.mov`, `.avi`, `.wmv`, `.webm`, `.flv`, `.f4v`, `.mpeg`, `.mpg`, `.mpe`, `.m2v`, `.mts`, `.m2ts`, `.ts`, `.vob`, `.ogv`, `.3gp`, `.3g2`, `.dv`, `.yuv`, `.h264`, `.h265`, `.hevc`, `.av1`, `.vp9`, `.braw`, `.r3d`, `.ari`, `.crm`, `.dpx`, `.cin`, `.mxf`, `.srt`, `.ass`, `.ssa`, `.vtt`, `.sbv`, `.sub`, `.idx`, `.ttml`, `.lrc`, `.cap`, `.prproj`, `.aep`, `.aepx`, `.drp`, `.dra`, `.veg`, `.kdenlive`, `.mlt`, `.otio`, `.fcpxml`, `.imovieproj`, `.mogrt` |
+| **9. Programming Languages & Source Code** | `.c`, `.h`, `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.hxx`, `.cs`, `.java`, `.class`, `.jar`, `.kt`, `.kts`, `.dart`, `.py`, `.pyw`, `.pyc`, `.pyo`, `.pyd`, `.ipynb`, `.rs`, `.rlib`, `.go`, `.php`, `.rb`, `.pl`, `.pm`, `.lua`, `.r`, `.R`, `.m`, `.mlx`, `.mm`, `.swift`, `.sc`, `.scala`, `.groovy`, `.clj`, `.cljs`, `.hs`, `.lhs`, `.ml`, `.mli`, `.fs`, `.fsi`, `.fsx`, `.vb`, `.vbs`, `.bas`, `.bat`, `.cmd`, `.ps1`, `.psm1`, `.psd1`, `.sh`, `.bash`, `.zsh`, `.fish`, `.awk`, `.sed`, `.tcl`, `.v`, `.sv`, `.vh`, `.vhd`, `.vhdl`, `.asm`, `.s`, `.S`, `.inc`, `.f`, `.for`, `.f90`, `.f95`, `.f03`, `.f08`, `.pas`, `.pp`, `.d`, `.nim`, `.zig`, `.odin`, `.ex`, `.exs`, `.erl`, `.hrl`, `.el`, `.lisp`, `.lsp`, `.scm`, `.rkt`, `.pro`, `.sol`, `.move`, `.wat`, `.wasm`, `.cshtml`, `.razor`, `.xaml`, `.resx` |
+| **10. Compiled Code, Libraries & Executables** | `.exe`, `.com`, `.dll`, `.so`, `.dylib`, `.a`, `.lib`, `.o`, `.obj`, `.bin`, `.elf`, `.out`, `.app`, `.deb`, `.rpm`, `.apk`, `.aab`, `.ipa`, `.msi`, `.msp`, `.msix`, `.appx`, `.appxbundle`, `.dmg`, `.pkg`, `.flatpak`, `.snap`, `.appimage`, `.whl`, `.egg`, `.nupkg`, `.gem`, `.crate`, `.war`, `.ear`, `.pdb`, `.map`, `.manifest`, `.sym`, `.dSYM` |
+| **11. Web Development & Internet Data** | `.html`, `.htm`, `.xhtml`, `.css`, `.scss`, `.sass`, `.less`, `.js`, `.mjs`, `.cjs`, `.jsx`, `.ts`, `.tsx`, `.vue`, `.svelte`, `.astro`, `.json`, `.jsonc`, `.json5`, `.xml`, `.xsl`, `.xslt`, `.dtd`, `.yaml`, `.yml`, `.toml`, `.ini`, `.cfg`, `.conf`, `.env`, `.properties`, `.graphql`, `.gql`, `.proto`, `.avsc`, `.thrift`, `.wsdl`, `.webmanifest`, `.map`, `.rss`, `.atom`, `.har`, `.http`, `.rest`, `.sql`, `.plsql`, `.prisma`, `.tf`, `.hcl`, `.mk`, `.make`, `.cmake`, `.gradle`, `.gradle.kts`, `.pom`, `.lock`, `.sum` |
+| **12. Spreadsheets, Databases & Scientific Data** | `.xlsx`, `.xls`, `.xlsm`, `.xlsb`, `.xltx`, `.xltm`, `.ods`, `.ots`, `.fods`, `.csv`, `.tsv`, `.dif`, `.slk`, `.numbers`, `.prn`, `.db`, `.sqlite`, `.sqlite3`, `.db3`, `.mdb`, `.accdb`, `.dump`, `.bak`, `.backup`, `.ibd`, `.frm`, `.myd`, `.myi`, `.mdf`, `.ldf`, `.ndf`, `.db-wal`, `.db-shm`, `.rdb`, `.aof`, `.bson`, `.parquet`, `.arrow`, `.feather`, `.orc`, `.avro`, `.h5`, `.hdf5`, `.nc`, `.mat`, `.rds`, `.rdata`, `.pkl`, `.pickle`, `.joblib`, `.npy`, `.npz`, `.pt`, `.pth`, `.safetensors`, `.onnx`, `.pb`, `.tflite`, `.gguf`, `.ggml`, `.weights`, `.ckpt`, `.checkpoint`, `.geojson`, `.gpx`, `.kml`, `.kmz`, `.shp`, `.shx`, `.dbf`, `.prj`, `.fits`, `.fit`, `.fts`, `.cdf`, `.grib`, `.grb`, `.grb2`, `.zarr`, `.vtk`, `.vtu`, `.vti`, `.vtr`, `.vts`, `.vtp`, `.unv`, `.inp`, `.odb`, `.bdf`, `.nas`, `.op2`, `.rst`, `.cas`, `.sdf`, `.mol`, `.pdb`, `.cif`, `.wfn`, `.cube`, `.chk`, `.fchk`, `.qasm`, `.qpy`, `.qobj` |
+| **13. Fonts & Typography** | `.ttf`, `.otf`, `.woff`, `.woff2`, `.fnt`, `.fon`, `.sfd`, `.ufo`, `.designspace`, `.vfb`, `.vfc`, `.pfb`, `.pfa`, `.afm`, `.bdf`, `.pcf`, `.otc`, `.ttc`, `.eot` |
+| **14. Office, Presentations & Publishing** | `.pptx`, `.ppt`, `.pptm`, `.ppsx`, `.pps`, `.potx`, `.odp`, `.otp`, `.key`, `.pub`, `.pmd`, `.indd`, `.idml`, `.qxd`, `.qxp`, `.xps`, `.oxps` |
+| **15. Operating System & Windows Files** | `.sys`, `.drv`, `.inf`, `.reg`, `.dat`, `.ini`, `.cfg`, `.msc`, `.cpl`, `.lnk`, `.url`, `.tmp`, `.cab`, `.evtx`, `.etl`, `.dmp`, `.mdmp`, `.wer`, `.scr`, `.pif`, `.ocx`, `.mo`, `.mui`, `.theme`, `.themepack`, `.deskthemepack`, `.ico`, `.cur`, `.ani` |
+| **16. Linux, Unix, Firmware & Disk Images** | `.bashrc`, `.zshrc`, `.profile`, `.service`, `.socket`, `.timer`, `.mount`, `.target`, `.desktop`, `.journal`, `.ko`, `.core`, `.crash`, `.patch`, `.diff`, `.efi`, `.fd`, `.rom`, `.bios`, `.cap`, `.wim`, `.esd`, `.swm`, `.iso`, `.img`, `.raw`, `.vhd`, `.vhdx`, `.vmdk`, `.vdi`, `.qcow`, `.qcow2`, `.ova`, `.ovf`, `.gpt`, `.mbr`, `.bcd`, `.swp`, `.swo` |
+| **17. Archives, Compression & Packages** | `.zip`, `.rar`, `.7z`, `.tar`, `.gz`, `.tgz`, `.tar.gz`, `.bz2`, `.tar.bz2`, `.xz`, `.tar.xz`, `.zst`, `.tar.zst`, `.lz4`, `.lz`, `.lzma`, `.cab`, `.ar`, `.cpio`, `.iso`, `.img`, `.dmg`, `.pak`, `.pk3`, `.pk4`, `.wad`, `.vpk`, `.bundle`, `.unitypackage`, `.apks`, `.xapk` |
+| **18. Electronics, PCB & Embedded Systems** | `.sch`, `.brd`, `.pcb`, `.kicad_sch`, `.kicad_pcb`, `.kicad_pro`, `.kicad_mod`, `.kicad_sym`, `.kicad_wks`, `.lib`, `.sym`, `.footprint`, `.gerber`, `.gbr`, `.gbx`, `.gbl`, `.gtl`, `.gbs`, `.gts`, `.gbo`, `.gto`, `.drl`, `.xln`, `.bom`, `.net`, `.netlist`, `.sp`, `.cir`, `.ckt`, `.asc`, `.asy`, `.raw`, `.plt`, `.model`, `.sub`, `.hex`, `.ihx`, `.uf2`, `.dfu`, `.eep`, `.eeprom`, `.ino`, `.pde`, `.fst`, `.vcd`, `.wlf`, `.fsdb`, `.gtkw` |
+| **19. Game Development & Modding** | `.gd`, `.gdshader`, `.tscn`, `.tres`, `.res`, `.import`, `.godot`, `.unity`, `.prefab`, `.asset`, `.meta`, `.shader`, `.compute`, `.hlsl`, `.glsl`, `.wgsl`, `.vert`, `.frag`, `.geom`, `.tesc`, `.tese`, `.comp`, `.spv`, `.fx`, `.usf`, `.ush`, `.uasset`, `.umap`, `.uproject`, `.uplugin`, `.utoc`, `.ucas`, `.vmat`, `.vtex`, `.vmesh`, `.kv`, `.kv3`, `.bsp`, `.nav`, `.navmesh`, `.mat`, `.material`, `.tex`, `.texture`, `.sprite`, `.bank`, `.fsb`, `.wem`, `.bnk`, `.save`, `.sav`, `.slot`, `.replay`, `.demo`, `.dem`, `.ghost`, `.profile`, `.esp`, `.esm`, `.esl`, `.bsa`, `.ba2`, `.asi`, `.mod` |
+| **20. Networking, Security & Certificates** | `.pcap`, `.pcapng`, `.cap`, `.pem`, `.crt`, `.cer`, `.cert`, `.der`, `.p12`, `.pfx`, `.p7b`, `.p7c`, `.p7s`, `.p8`, `.key`, `.pub`, `.csr`, `.asc`, `.gpg`, `.pgp`, `.sig`, `.sha256`, `.sha1`, `.md5`, `.torrent`, `.ovpn`, `.wg`, `.htaccess`, `.htpasswd`, `.zone`, `.hosts`, `.mobileconfig`, `.plist`, `.entitlements`, `.keychain`, `.kdbx`, `.wallet`, `.vault`, `.enc`, `.encrypted` |
+| **21. Android & Apple Development** | `.dex`, `.odex`, `.vdex`, `.art`, `.obb`, `.aar`, `.ipsw`, `.framework`, `.xcframework`, `.xcodeproj`, `.xcworkspace`, `.storyboard`, `.xib`, `.strings`, `.stringsdict`, `.car`, `.assetcatalog`, `.command` |
+| **22. Developer Tools, Build Files & Project Metadata** | `.gitignore`, `.gitattributes`, `.gitmodules`, `.gitconfig`, `.editorconfig`, `.prettierrc`, `.eslintrc`, `.eslintignore`, `.npmrc`, `.nvmrc`, `.node-version`, `.yarn.lock`, `.pnpm-lock.yaml`, `Cargo.toml`, `.sln`, `.csproj`, `.vcxproj`, `.vbproj`, `.fsproj`, `.props`, `.targets`, `.config`, `.launch`, `.code-workspace`, `.project`, `.classpath`, `.settings`, `.iml`, `.sublime-project`, `.sublime-workspace`, `.vimrc`, `init.lua`, `Dockerfile`, `Makefile`, `CMakeLists.txt`, `package-lock.json`, `pom.xml`, `.gradle.kts` |
+| **23. Other Generic & Miscellaneous Files** | `.blob`, `.tmp`, `.temp`, `.bak`, `.backup`, `.old`, `.orig`, `.rej`, `.todo`, `.test`, `.spec`, `.snap`, `.snapshot`, `.report`, `.trace`, `.prof`, `.coverage`, `.gcda`, `.gcno`, `.pid`, `.fifo`, `.pipe`, `.symlink`, `.link`, `.shortcut`, `.workflow`, `.automator`, `.action`, `.addon`, `.extension`, `.template`, `.tpl`, `.sample`, `.example`, `.stack`, `.symbols` |
 
-### 1. Web (Static + WASM)
-```powershell
-rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version 0.2.130
-.\scripts\build-web.ps1
-# Serve frontend/ with any static HTTP server
-```
+## Why do I even need this?
 
-### 2. Windows (x86_64 / aarch64)
-```powershell
-cargo build -p ufo-app --release
-# Or with Tauri bundler:
-cargo tauri build
-```
+No idea, if you explore different file types or are annoyed with installing tons of apps just to open a random file.
 
-### 3. macOS (Universal / Apple Silicon / Intel)
-```bash
-rustup target add aarch64-apple-darwin x86_64-apple-darwin
-cargo tauri build --target universal-apple-darwin
-```
+## How do I install?
 
-### 4. Linux (x86_64 / aarch64)
-```bash
-cargo tauri build
-```
+Go to the website (url will be added later) or click on releases and get the one for your device.
 
-### 5. Android (APK / AAB)
-```bash
-rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
-cargo tauri android init
-cargo tauri android build
-```
+## How do I build from source?
 
-### 6. iOS (iPhone / iPad IPA — requires macOS + Xcode)
-```bash
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim
-cargo tauri ios init
-cargo tauri ios build
-```
+I can't explain that, ask your AI agent or a chatbot with the link of this repo.
 
-### CLI & Tests
-```powershell
-cargo test --workspace
-cargo run -p ufo-cli -- path/to/any/file
-```
+## How do I use it?
+
+Just open the app or use "Open with" from File Explorer and select the app.
