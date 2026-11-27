@@ -372,17 +372,53 @@ export function mountMeshViewer(container, meshData, getIsLight) {
     shell.appendChild(side);
   }
 
+  const cubeHud = document.createElement("div");
+  cubeHud.className = "ufo-viewcube-hud";
+  cubeHud.innerHTML = `
+    <div class="ufo-viewcube-roll-bar">
+      <button type="button" class="ufo-viewcube-btn" data-vc-act="ccw" title="Rotate Anticlockwise (90° · Shift: 15°)"><i class="bi bi-arrow-counterclockwise"></i></button>
+      <button type="button" class="ufo-viewcube-btn" data-vc-act="iso" title="Isometric Home View"><i class="bi bi-house"></i></button>
+      <button type="button" class="ufo-viewcube-btn" data-vc-act="cw" title="Rotate Clockwise (90° · Shift: 15°)"><i class="bi bi-arrow-clockwise"></i></button>
+    </div>
+    <div class="ufo-viewcube-scene" title="Drag to orbit · Click face to snap">
+      <div class="ufo-viewcube-cube">
+        <button type="button" class="ufo-viewcube-face" data-vc-face="front" style="transform:translateZ(26px)">FRONT</button>
+        <button type="button" class="ufo-viewcube-face" data-vc-face="back" style="transform:rotateY(180deg) translateZ(26px)">BACK</button>
+        <button type="button" class="ufo-viewcube-face" data-vc-face="right" style="transform:rotateY(90deg) translateZ(26px)">RIGHT</button>
+        <button type="button" class="ufo-viewcube-face" data-vc-face="left" style="transform:rotateY(-90deg) translateZ(26px)">LEFT</button>
+        <button type="button" class="ufo-viewcube-face" data-vc-face="top" style="transform:rotateX(90deg) translateZ(26px)">TOP</button>
+        <button type="button" class="ufo-viewcube-face" data-vc-face="bottom" style="transform:rotateX(-90deg) translateZ(26px)">BOTTOM</button>
+      </div>
+    </div>
+  `;
+  mainPane.appendChild(cubeHud);
+
   container.appendChild(shell);
 
+  const cubeEl = cubeHud.querySelector(".ufo-viewcube-cube");
+  const cubeScene = cubeHud.querySelector(".ufo-viewcube-scene");
+
   const gl = canvas.getContext("webgl2", { antialias: true, alpha: false }) || canvas.getContext("webgl", { antialias: true });
-  let yaw = 0.65;
-  let pitch = 0.42;
+  let rotQ = stdViewQuat("iso");
+  let animView = null; // { fromQ, toQ, startMs, durationMs }
   let dist = 3.1;
   let panX = 0;
   let panY = 0;
   let rafId = 0;
   let destroyed = false;
   let lastFrameMs = performance.now();
+
+  const startViewAnim = (toQ, durationMs = 260) => {
+    autoSpin = false;
+    const spinBtn = hud.querySelector("[data-act='spin']");
+    if (spinBtn) spinBtn.classList.remove("active");
+    animView = {
+      fromQ: rotQ.slice(),
+      toQ: quatNorm(toQ),
+      startMs: performance.now(),
+      durationMs,
+    };
+  };
 
   let drawFn = () => {};
   const createdTextures = [];
@@ -524,7 +560,7 @@ export function mountMeshViewer(container, meshData, getIsLight) {
       gl.enable(gl.DEPTH_TEST);
       gl.useProgram(prog);
 
-      const model = mat4RotateXY(pitch, yaw);
+      const model = quatToMat4ColMajor(rotQ);
       const view = mat4Translate(panX, panY, -dist);
       const proj = mat4Perspective(45 * Math.PI / 180, w / h, 0.05, 100.0);
       const mvp = mat4Mul(proj, mat4Mul(view, model));
@@ -722,6 +758,14 @@ export function mountMeshViewer(container, meshData, getIsLight) {
   const pointers = new Map();
   let lastPinch = 0;
 
+  const applyOrbitDelta = (dxp, dyp) => {
+    animView = null;
+    const sens = 0.0085;
+    const dQy = quatFromAxis([0, 1, 0], dxp * sens);
+    const dQx = quatFromAxis([1, 0, 0], dyp * sens);
+    rotQ = quatNorm(quatMul(quatMul(dQx, dQy), rotQ));
+  };
+
   canvas.addEventListener("pointerdown", (e) => {
     canvas.setPointerCapture(e.pointerId);
     canvas.style.cursor = "grabbing";
@@ -738,8 +782,7 @@ export function mountMeshViewer(container, meshData, getIsLight) {
         panX += dxp * 0.004 * dist;
         panY -= dyp * 0.004 * dist;
       } else {
-        yaw += dxp * 0.009;
-        pitch = Math.max(-1.55, Math.min(1.55, pitch + dyp * 0.009));
+        applyOrbitDelta(dxp, dyp);
       }
     } else if (pointers.size === 2) {
       const pts = Array.from(pointers.values());
@@ -763,6 +806,61 @@ export function mountMeshViewer(container, meshData, getIsLight) {
     dist = Math.max(0.35, Math.min(25, dist * (1 + e.deltaY * 0.001)));
   }, { passive: false });
 
+  // Bottom-left CAD ViewCube drag-orbit + face snap + CW/CCW roll controls
+  let vcDrag = null;
+  let vcSuppressClick = false;
+  cubeScene.addEventListener("pointerdown", (e) => {
+    cubeScene.setPointerCapture(e.pointerId);
+    cubeScene.classList.add("dragging");
+    vcDrag = { id: e.pointerId, x: e.clientX, y: e.clientY, moved: 0 };
+  });
+  cubeScene.addEventListener("pointermove", (e) => {
+    if (!vcDrag || vcDrag.id !== e.pointerId) return;
+    const dxp = e.clientX - vcDrag.x;
+    const dyp = e.clientY - vcDrag.y;
+    vcDrag.x = e.clientX;
+    vcDrag.y = e.clientY;
+    vcDrag.moved += Math.hypot(dxp, dyp);
+    if (vcDrag.moved > 3) {
+      applyOrbitDelta(dxp * 1.4, dyp * 1.4);
+    }
+  });
+  const vcRelease = (e) => {
+    if (!vcDrag || vcDrag.id !== e.pointerId) return;
+    if (vcDrag.moved > 5) {
+      vcSuppressClick = true;
+      setTimeout(() => { vcSuppressClick = false; }, 60);
+    }
+    vcDrag = null;
+    cubeScene.classList.remove("dragging");
+  };
+  cubeScene.addEventListener("pointerup", vcRelease);
+  cubeScene.addEventListener("pointercancel", vcRelease);
+
+  cubeHud.addEventListener("click", (e) => {
+    if (vcSuppressClick) return;
+    const faceBtn = e.target.closest("[data-vc-face]");
+    if (faceBtn) {
+      startViewAnim(stdViewQuat(faceBtn.dataset.vcFace));
+      return;
+    }
+    const actBtn = e.target.closest("[data-vc-act]");
+    if (!actBtn) return;
+    const act = actBtn.dataset.vcAct;
+    if (act === "iso") {
+      panX = 0;
+      panY = 0;
+      dist = 3.1;
+      startViewAnim(stdViewQuat("iso"));
+    } else if (act === "cw" || act === "ccw") {
+      const step = e.shiftKey ? (Math.PI / 12) : (Math.PI / 2);
+      const signed = act === "cw" ? -step : step;
+      const base = animView ? animView.toQ : rotQ;
+      const target = quatMul(quatFromAxis([0, 0, 1], signed), base);
+      startViewAnim(target, 220);
+    }
+  });
+
   hud.addEventListener("click", (e) => {
     const btn = e.target.closest("button");
     if (!btn) return;
@@ -783,7 +881,12 @@ export function mountMeshViewer(container, meshData, getIsLight) {
       animSpeed = animSpeed === 1.0 ? 0.5 : animSpeed === 0.5 ? 2.0 : animSpeed === 2.0 ? 0.25 : 1.0;
       btn.textContent = `${animSpeed}x`;
     }
-    if (act === "reset") { yaw = 0.65; pitch = 0.42; dist = 3.1; panX = 0; panY = 0; }
+    if (act === "reset") {
+      dist = 3.1;
+      panX = 0;
+      panY = 0;
+      startViewAnim(stdViewQuat("iso"));
+    }
   });
   hud.addEventListener("change", (e) => {
     if (e.target.dataset.act === "clip") {
@@ -804,7 +907,17 @@ export function mountMeshViewer(container, meshData, getIsLight) {
     if (destroyed) return;
     const dt = Math.min((now - lastFrameMs) / 1000, 0.1);
     lastFrameMs = now;
-    if (autoSpin) yaw += 0.0032;
+    if (animView) {
+      const rawT = Math.min(1, Math.max(0, (now - animView.startMs) / Math.max(animView.durationMs, 1)));
+      const eased = rawT * rawT * (3 - 2 * rawT);
+      rotQ = quatSlerp(animView.fromQ, animView.toQ, eased);
+      if (rawT >= 1) animView = null;
+    } else if (autoSpin) {
+      rotQ = quatNorm(quatMul(quatFromAxis([0, 1, 0], 0.0032), rotQ));
+    }
+    if (cubeEl) {
+      cubeEl.style.transform = quatToCssMatrix3d(rotQ);
+    }
     if (animPlaying && clips.length > 0) {
       const dur = Math.max(clips[animClipIdx]?.duration_secs || 1.0, 0.1);
       animTime = (animTime + dt * animSpeed) % dur;
@@ -821,6 +934,95 @@ export function mountMeshViewer(container, meshData, getIsLight) {
       for (const t of createdTextures) gl.deleteTexture(t);
     }
   };
+}
+
+function quatFromAxis(axis, angle) {
+  const half = angle * 0.5;
+  const s = Math.sin(half);
+  const len = Math.hypot(axis[0], axis[1], axis[2]) || 1;
+  return [axis[0] / len * s, axis[1] / len * s, axis[2] / len * s, Math.cos(half)];
+}
+
+function quatMul(a, b) {
+  const [ax, ay, az, aw] = a;
+  const [bx, by, bz, bw] = b;
+  return [
+    aw * bx + ax * bw + ay * bz - az * by,
+    aw * by - ax * bz + ay * bw + az * bx,
+    aw * bz + ax * by - ay * bx + az * bw,
+    aw * bw - ax * bx - ay * by - az * bz,
+  ];
+}
+
+function quatNorm(q) {
+  const l = Math.hypot(q[0], q[1], q[2], q[3]) || 1;
+  return [q[0] / l, q[1] / l, q[2] / l, q[3] / l];
+}
+
+function quatSlerp(q0, q1, t) {
+  let [x0, y0, z0, w0] = q0;
+  let [x1, y1, z1, w1] = q1;
+  let d = x0 * x1 + y0 * y1 + z0 * z1 + w0 * w1;
+  if (d < 0) {
+    d = -d;
+    x1 = -x1; y1 = -y1; z1 = -z1; w1 = -w1;
+  }
+  if (d > 0.9995) {
+    return quatNorm([
+      x0 + (x1 - x0) * t,
+      y0 + (y1 - y0) * t,
+      z0 + (z1 - z0) * t,
+      w0 + (w1 - w0) * t,
+    ]);
+  }
+  const th = Math.acos(Math.min(1, Math.max(-1, d)));
+  const s = Math.sin(th);
+  const wA = Math.sin((1 - t) * th) / s;
+  const wB = Math.sin(t * th) / s;
+  return quatNorm([
+    x0 * wA + x1 * wB,
+    y0 * wA + y1 * wB,
+    z0 * wA + z1 * wB,
+    w0 * wA + w1 * wB,
+  ]);
+}
+
+function quatToMat4ColMajor(q) {
+  const [x, y, z, w] = q;
+  const x2 = x + x, y2 = y + y, z2 = z + z;
+  const xx = x * x2, xy = x * y2, xz = x * z2;
+  const yy = y * y2, yz = y * z2, zz = z * z2;
+  const wx = w * x2, wy = w * y2, wz = w * z2;
+  return new Float32Array([
+    1 - (yy + zz), xy + wz, xz - wy, 0,
+    xy - wz, 1 - (xx + zz), yz + wx, 0,
+    xz + wy, yz - wx, 1 - (xx + yy), 0,
+    0, 0, 0, 1,
+  ]);
+}
+
+function quatToCssMatrix3d(q) {
+  // Conjugate by S = diag(1, -1, 1) to align WebGL (+Y up) with CSS 3D (+Y down).
+  const m = quatToMat4ColMajor(q);
+  const c00 = m[0],  c10 = -m[1], c20 = m[2];
+  const c01 = -m[4], c11 = m[5],  c21 = -m[6];
+  const c02 = m[8],  c12 = -m[9], c22 = m[10];
+  return `matrix3d(${c00.toFixed(6)},${c10.toFixed(6)},${c20.toFixed(6)},0,${c01.toFixed(6)},${c11.toFixed(6)},${c21.toFixed(6)},0,${c02.toFixed(6)},${c12.toFixed(6)},${c22.toFixed(6)},0,0,0,0,1)`;
+}
+
+function stdViewQuat(name) {
+  const h = Math.PI * 0.5;
+  switch (String(name || "").toLowerCase()) {
+    case "front": return [0, 0, 0, 1];
+    case "back": return quatFromAxis([0, 1, 0], Math.PI);
+    case "right": return quatFromAxis([0, 1, 0], -h);
+    case "left": return quatFromAxis([0, 1, 0], h);
+    case "top": return quatFromAxis([1, 0, 0], h);
+    case "bottom": return quatFromAxis([1, 0, 0], -h);
+    case "iso":
+    default:
+      return quatNorm(quatMul(quatFromAxis([1, 0, 0], 0.42), quatFromAxis([0, 1, 0], -0.65)));
+  }
 }
 
 function createProgram(gl, vsSrc, fsSrc) {
@@ -850,17 +1052,6 @@ function mat4Perspective(fov, aspect, near, far) {
 
 function mat4Translate(x, y, z) {
   return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, x,y,z,1]);
-}
-
-function mat4RotateXY(rx, ry) {
-  const cx = Math.cos(rx), sx = Math.sin(rx);
-  const cy = Math.cos(ry), sy = Math.sin(ry);
-  return new Float32Array([
-    cy, sx * sy, -cx * sy, 0,
-    0, cx, sx, 0,
-    sy, -sx * cy, cx * cy, 0,
-    0, 0, 0, 1,
-  ]);
 }
 
 function mat4Mul(a, b) {

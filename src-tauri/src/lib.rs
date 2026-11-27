@@ -26,6 +26,7 @@ struct SessionEntry {
     file_name: String,
     mime: String,
     backing: FileBacking,
+    source_dir: Option<PathBuf>,
 }
 
 struct AppState {
@@ -48,6 +49,7 @@ impl Default for AppState {
 struct OpenSessionResponse {
     session_id: String,
     stream_url: String,
+    asset_base_url: Option<String>,
     report: ufo_core::OpenFileReport,
 }
 
@@ -67,32 +69,40 @@ struct FormatCatalogItem {
     mime: &'static str,
 }
 
-fn stream_url_for(session_id: &str) -> String {
+fn origin_for_scheme() -> &'static str {
     if cfg!(any(target_os = "windows", target_os = "android")) {
-        format!("http://ufo.localhost/stream/{session_id}")
+        "http://ufo.localhost"
     } else {
-        format!("ufo://localhost/stream/{session_id}")
+        "ufo://localhost"
     }
+}
+
+fn stream_url_for(session_id: &str) -> String {
+    format!("{}/stream/{session_id}", origin_for_scheme())
 }
 
 fn store_session(
     state: &AppState,
     file_name: String,
     backing: FileBacking,
+    source_dir: Option<PathBuf>,
     report: ufo_core::OpenFileReport,
 ) -> Result<OpenSessionResponse, String> {
     let id_num = state.next_id.fetch_add(1, Ordering::Relaxed);
     let session_id = format!("ufo-{id_num}");
     let mime = report.detected.mime.clone();
+    let has_source_dir = source_dir.is_some();
     let entry = Arc::new(SessionEntry {
         file_name,
         mime,
         backing,
+        source_dir,
     });
     let mut map = state.sessions.lock().map_err(|_| "Session lock poisoned")?;
     map.insert(session_id.clone(), entry);
     Ok(OpenSessionResponse {
         stream_url: stream_url_for(&session_id),
+        asset_base_url: has_source_dir.then(|| format!("{}/asset/{session_id}/", origin_for_scheme())),
         session_id,
         report,
     })
@@ -152,9 +162,12 @@ async fn open_path(path: String, state: State<'_, Arc<AppState>>) -> Result<Open
                 }
             }
         };
+        let source_dir = p.parent().map(|par| {
+            std::fs::canonicalize(par).unwrap_or_else(|_| par.to_path_buf())
+        });
         let bytes = backing.as_bytes();
         let report = ufo_core::open_bytes(&file_name, bytes, Some(bytes.len() as u64));
-        store_session(&app_state, file_name, backing, report)
+        store_session(&app_state, file_name, backing, source_dir, report)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -169,7 +182,7 @@ async fn open_bytes_ipc(
     let app_state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
         let report = ufo_core::open_bytes(&file_name, &bytes, Some(bytes.len() as u64));
-        store_session(&app_state, file_name, FileBacking::Memory(bytes), report)
+        store_session(&app_state, file_name, FileBacking::Memory(bytes), None, report)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -193,7 +206,7 @@ async fn open_archive_entry_session(
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or(entry_path);
         let report = ufo_core::open_bytes(&name, &entry_bytes, Some(entry_bytes.len() as u64));
-        store_session(&app_state, name, FileBacking::Memory(entry_bytes), report)
+        store_session(&app_state, name, FileBacking::Memory(entry_bytes), None, report)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -379,6 +392,116 @@ fn window_start_dragging(window: Window) -> Result<(), String> {
     Ok(())
 }
 
+fn percent_decode_utf8(raw: &str) -> String {
+    let b = raw.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(hex_str) = std::str::from_utf8(&b[i + 1..i + 3]) {
+                if let Ok(val) = u8::from_str_radix(hex_str, 16) {
+                    out.push(val);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn asset_mime_for_path(path: &Path) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" | "apng" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" | "svgz" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "ico" | "cur" => "image/x-icon",
+        "avif" => "image/avif",
+        "tif" | "tiff" => "image/tiff",
+        "jxl" => "image/jxl",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        _ => "application/octet-stream",
+    }
+}
+
+fn serve_session_asset(app_state: &AppState, rest: &str) -> http::Response<Vec<u8>> {
+    let not_found = || {
+        http::Response::builder()
+            .status(http::StatusCode::NOT_FOUND)
+            .header("Access-Control-Allow-Origin", "*")
+            .body(Vec::new())
+            .unwrap()
+    };
+    let Some((session_id, rel_raw)) = rest.split_once('/') else {
+        return not_found();
+    };
+    let entry = {
+        let Ok(map) = app_state.sessions.lock() else {
+            return http::Response::builder().status(500).body(Vec::new()).unwrap();
+        };
+        map.get(session_id).cloned()
+    };
+    let Some(base_dir) = entry.as_ref().and_then(|e| e.source_dir.as_ref()) else {
+        return not_found();
+    };
+    let clean_rel = rel_raw.split(['?', '#']).next().unwrap_or("");
+    let decoded = percent_decode_utf8(clean_rel).replace('\\', "/");
+    let trimmed = decoded.trim_start_matches('/');
+    if trimmed.is_empty() || trimmed.contains('\0') {
+        return not_found();
+    }
+    let rel_path = Path::new(trimmed);
+    for comp in rel_path.components() {
+        if matches!(
+            comp,
+            std::path::Component::RootDir | std::path::Component::Prefix(_)
+        ) {
+            return not_found();
+        }
+    }
+    let Ok(canon_base) = std::fs::canonicalize(base_dir) else {
+        return not_found();
+    };
+    let candidate = canon_base.join(rel_path);
+    let Ok(canon_file) = std::fs::canonicalize(&candidate) else {
+        return not_found();
+    };
+    if !canon_file.starts_with(&canon_base) {
+        return not_found();
+    }
+    let Ok(meta) = std::fs::metadata(&canon_file) else {
+        return not_found();
+    };
+    if !meta.is_file() || meta.len() > 64 * 1024 * 1024 {
+        return not_found();
+    }
+    let Ok(bytes) = std::fs::read(&canon_file) else {
+        return not_found();
+    };
+    let mime = asset_mime_for_path(&canon_file);
+    http::Response::builder()
+        .status(http::StatusCode::OK)
+        .header(http::header::CONTENT_TYPE, mime)
+        .header(http::header::CONTENT_LENGTH, bytes.len().to_string())
+        .header("Access-Control-Allow-Origin", "*")
+        .body(bytes)
+        .unwrap()
+}
+
 /// Parses HTTP Range: bytes=START-END and serves 206 Partial Content chunks from zero-copy mmap.
 fn handle_stream_request(
     app_state: &AppState,
@@ -395,6 +518,10 @@ fn handle_stream_request(
     }
 
     let path = request.uri().path();
+    if let Some(rest) = path.strip_prefix("/asset/") {
+        return serve_session_asset(app_state, rest);
+    }
+
     let session_id = path.strip_prefix("/stream/").unwrap_or("").trim_matches('/');
     let entry = {
         let Ok(map) = app_state.sessions.lock() else {

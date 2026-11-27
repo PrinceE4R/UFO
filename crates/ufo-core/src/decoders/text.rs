@@ -545,113 +545,711 @@ pub fn escape_html(s: &str) -> String {
 }
 
 pub fn render_markdown_html(md: &str) -> String {
-    let mut html = String::with_capacity(md.len() + 256);
-    let mut in_code = false;
-    let mut in_list = false;
+    let lines: Vec<&str> = md.lines().take(5000).collect();
+    let mut html = String::with_capacity(md.len().saturating_mul(2) + 256);
+    let mut list_stack: Vec<(usize, &'static str)> = Vec::new();
+    let mut i = 0usize;
 
-    for line in md.lines().take(2500) {
-        let trimmed = line.trim_end();
-        if trimmed.starts_with("```") {
-            if in_list {
-                html.push_str("</ul>\n");
-                in_list = false;
+    let close_lists_to = |target: Option<usize>, stack: &mut Vec<(usize, &'static str)>, out: &mut String| {
+        while let Some(&(ind, tag)) = stack.last() {
+            if target.is_some_and(|t| ind < t) {
+                break;
             }
-            if in_code {
-                html.push_str("</code></pre>\n");
-                in_code = false;
-            } else {
-                let lang = escape_html(trimmed.trim_start_matches('`').trim());
-                html.push_str(&format!("<pre class=\"md-code\" data-lang=\"{lang}\"><code>"));
-                in_code = true;
+            out.push_str(&format!("</{tag}>\n"));
+            stack.pop();
+        }
+    };
+    let close_all_lists = |stack: &mut Vec<(usize, &'static str)>, out: &mut String| {
+        while let Some((_, tag)) = stack.pop() {
+            out.push_str(&format!("</{tag}>\n"));
+        }
+    };
+
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed_end = line.trim_end();
+        let trimmed = trimmed_end.trim_start();
+
+        // Fenced code blocks ``` or ~~~
+        if let Some((fence_ch, fence_len, info)) = parse_md_fence(trimmed) {
+            close_all_lists(&mut list_stack, &mut html);
+            let lang = escape_html(info.trim());
+            html.push_str(&format!("<pre class=\"md-code\" data-lang=\"{lang}\"><code>"));
+            i += 1;
+            while i < lines.len() {
+                let code_line = lines[i];
+                let ct = code_line.trim();
+                let close_len = ct.bytes().take_while(|&b| b == fence_ch as u8).count();
+                if close_len >= fence_len && ct.len() == close_len {
+                    i += 1;
+                    break;
+                }
+                html.push_str(&escape_html(code_line));
+                html.push('\n');
+                i += 1;
             }
+            html.push_str("</code></pre>\n");
             continue;
         }
-        if in_code {
-            html.push_str(&escape_html(line));
-            html.push('\n');
-            continue;
-        }
+
+        // Blank lines
         if trimmed.is_empty() {
-            if in_list {
-                html.push_str("</ul>\n");
-                in_list = false;
-            }
+            close_all_lists(&mut list_stack, &mut html);
+            i += 1;
             continue;
         }
-        if trimmed == "---" || trimmed == "***" {
-            if in_list {
-                html.push_str("</ul>\n");
-                in_list = false;
-            }
+
+        // Horizontal rule (---, ***, ___)
+        if is_md_hr(trimmed) {
+            close_all_lists(&mut list_stack, &mut html);
             html.push_str("<hr/>\n");
+            i += 1;
             continue;
         }
+
+        // ATX Headings (# .. ######)
         let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
-        if (1..=6).contains(&hashes) && trimmed.as_bytes().get(hashes) == Some(&b' ') {
-            if in_list {
-                html.push_str("</ul>\n");
-                in_list = false;
-            }
-            let content = render_inline_md(trimmed[hashes + 1..].trim());
-            html.push_str(&format!("<h{hashes}>{content}</h{hashes}>\n"));
+        if (1..=6).contains(&hashes)
+            && trimmed
+                .as_bytes()
+                .get(hashes)
+                .is_none_or(|&b| b == b' ' || b == b'\t')
+        {
+            close_all_lists(&mut list_stack, &mut html);
+            let inner = trimmed[hashes..].trim().trim_end_matches('#').trim_end();
+            let slug = md_heading_slug(inner);
+            let content = render_inline_md(inner);
+            html.push_str(&format!(
+                "<a id=\"{slug}\" class=\"md-anchor\" aria-hidden=\"true\"></a><h{hashes}>{content}</h{hashes}>\n"
+            ));
+            i += 1;
             continue;
         }
-        if trimmed.starts_with("> ") {
-            if in_list {
-                html.push_str("</ul>\n");
-                in_list = false;
+
+        // GFM Pipe Table (header row + separator row |---|:---:|)
+        if i + 1 < lines.len() && is_md_table_candidate(trimmed) {
+            if let Some(aligns) = parse_md_table_aligns(lines[i + 1].trim()) {
+                let headers = split_md_table_row(trimmed);
+                if !headers.is_empty() && headers.len() == aligns.len() {
+                    close_all_lists(&mut list_stack, &mut html);
+                    html.push_str("<div class=\"md-table-wrap\"><table class=\"md-table\">\n<thead><tr>");
+                    for (ci, cell) in headers.iter().enumerate() {
+                        let align = aligns.get(ci).copied().unwrap_or("");
+                        let style = if align.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" style=\"text-align:{align}\"")
+                        };
+                        html.push_str(&format!("<th{style}>{}</th>", render_inline_md(cell.trim())));
+                    }
+                    html.push_str("</tr></thead>\n<tbody>\n");
+                    i += 2;
+                    while i < lines.len() {
+                        let row_t = lines[i].trim();
+                        if row_t.is_empty() || !row_t.contains('|') || is_md_fence(row_t) {
+                            break;
+                        }
+                        let cols = split_md_table_row(row_t);
+                        html.push_str("<tr>");
+                        for ci in 0..aligns.len() {
+                            let align = aligns.get(ci).copied().unwrap_or("");
+                            let style = if align.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" style=\"text-align:{align}\"")
+                            };
+                            let val = cols.get(ci).map(|s| s.trim()).unwrap_or("");
+                            html.push_str(&format!("<td{style}>{}</td>", render_inline_md(val)));
+                        }
+                        html.push_str("</tr>\n");
+                        i += 1;
+                    }
+                    html.push_str("</tbody></table></div>\n");
+                    continue;
+                }
             }
-            html.push_str(&format!("<blockquote>{}</blockquote>\n", render_inline_md(&trimmed[2..])));
+        }
+
+        // Multi-line Blockquote
+        if trimmed.starts_with('>') {
+            close_all_lists(&mut list_stack, &mut html);
+            let mut quote_lines = Vec::new();
+            while i < lines.len() {
+                let qt = lines[i].trim_start();
+                if let Some(rest) = qt.strip_prefix('>') {
+                    quote_lines.push(rest.strip_prefix(' ').unwrap_or(rest));
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            let inner_md = quote_lines.join("\n");
+            let inner_html = render_markdown_html(&inner_md);
+            html.push_str(&format!("<blockquote>{inner_html}</blockquote>\n"));
             continue;
         }
-        if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
-            if !in_list {
-                html.push_str("<ul>\n");
-                in_list = true;
+
+        // Unordered, Task (- [ ] / - [x]), or Ordered (1. / 1)) list item
+        if let Some((tag, content, task_state)) = parse_md_list_marker(trimmed) {
+            let indent = line.len() - trimmed.len();
+            // Close deeper lists
+            while let Some(&(top_ind, top_tag)) = list_stack.last() {
+                if top_ind > indent {
+                    html.push_str(&format!("</{top_tag}>\n"));
+                    list_stack.pop();
+                } else {
+                    break;
+                }
             }
-            html.push_str(&format!("<li>{}</li>\n", render_inline_md(&trimmed[2..])));
+            if list_stack.last().is_none_or(|&(top_ind, top_tag)| top_ind < indent || top_tag != tag) {
+                if list_stack.last().is_some_and(|&(top_ind, top_tag)| top_ind == indent && top_tag != tag) {
+                    if let Some((_, prev_tag)) = list_stack.pop() {
+                        html.push_str(&format!("</{prev_tag}>\n"));
+                    }
+                }
+                html.push_str(&format!("<{tag}>\n"));
+                list_stack.push((indent, tag));
+            }
+            let _ = close_lists_to;
+            let rendered = render_inline_md(content);
+            match task_state {
+                Some(checked) => {
+                    let chk = if checked { " checked" } else { "" };
+                    html.push_str(&format!(
+                        "<li class=\"md-task-item\"><input type=\"checkbox\" disabled{chk}/> <span>{rendered}</span></li>\n"
+                    ));
+                }
+                None => {
+                    html.push_str(&format!("<li>{rendered}</li>\n"));
+                }
+            }
+            i += 1;
             continue;
         }
-        if in_list {
-            html.push_str("</ul>\n");
-            in_list = false;
+
+        close_all_lists(&mut list_stack, &mut html);
+
+        // Setext Heading (Title \n === or ---)
+        if i + 1 < lines.len() {
+            let next_t = lines[i + 1].trim();
+            if next_t.len() >= 2 && next_t.bytes().all(|b| b == b'=') {
+                let slug = md_heading_slug(trimmed);
+                html.push_str(&format!(
+                    "<a id=\"{slug}\" class=\"md-anchor\" aria-hidden=\"true\"></a><h1>{}</h1>\n",
+                    render_inline_md(trimmed)
+                ));
+                i += 2;
+                continue;
+            }
+            if next_t.len() >= 2 && next_t.bytes().all(|b| b == b'-') && !trimmed.contains('|') {
+                let slug = md_heading_slug(trimmed);
+                html.push_str(&format!(
+                    "<a id=\"{slug}\" class=\"md-anchor\" aria-hidden=\"true\"></a><h2>{}</h2>\n",
+                    render_inline_md(trimmed)
+                ));
+                i += 2;
+                continue;
+            }
         }
-        html.push_str(&format!("<p>{}</p>\n", render_inline_md(trimmed)));
+
+        // Paragraph (accumulates contiguous non-block lines)
+        let mut para_lines: Vec<String> = Vec::new();
+        while i < lines.len() {
+            let cur_raw = lines[i];
+            let cur_t = cur_raw.trim();
+            if cur_t.is_empty()
+                || parse_md_fence(cur_t).is_some()
+                || is_md_hr(cur_t)
+                || cur_t.starts_with('>')
+                || parse_md_list_marker(cur_t).is_some()
+                || (1..=6).any(|h| {
+                    cur_t.starts_with(&"#".repeat(h))
+                        && cur_t.as_bytes().get(h).is_some_and(|&b| b == b' ' || b == b'\t')
+                })
+                || (i + 1 < lines.len()
+                    && is_md_table_candidate(cur_t)
+                    && parse_md_table_aligns(lines[i + 1].trim()).is_some())
+            {
+                break;
+            }
+            let has_hard_break = cur_raw.ends_with("  ") || cur_raw.trim_end().ends_with('\\');
+            let piece = if cur_raw.trim_end().ends_with('\\') {
+                cur_t.trim_end_matches('\\').trim_end()
+            } else {
+                cur_t
+            };
+            let mut rendered = render_inline_md(piece);
+            if has_hard_break {
+                rendered.push_str("<br/>");
+            }
+            para_lines.push(rendered);
+            i += 1;
+        }
+        if !para_lines.is_empty() {
+            html.push_str(&format!("<p>{}</p>\n", para_lines.join("\n")));
+        } else {
+            i += 1;
+        }
     }
-    if in_list {
-        html.push_str("</ul>\n");
-    }
-    if in_code {
-        html.push_str("</code></pre>\n");
-    }
+
+    close_all_lists(&mut list_stack, &mut html);
     html
 }
 
-fn render_inline_md(s: &str) -> String {
-    let esc = escape_html(s);
-    // Inline code backticks
-    let mut out = String::with_capacity(esc.len());
-    let parts: Vec<&str> = esc.split('`').collect();
-    for (idx, part) in parts.iter().enumerate() {
-        if idx % 2 == 1 {
-            out.push_str("<code>");
-            out.push_str(part);
-            out.push_str("</code>");
-        } else {
-            // Bold **text**
-            let mut seg = String::new();
-            let bold_parts: Vec<&str> = part.split("**").collect();
-            for (bi, bp) in bold_parts.iter().enumerate() {
-                if bi % 2 == 1 && bi + 1 < bold_parts.len() {
-                    seg.push_str("<strong>");
-                    seg.push_str(bp);
-                    seg.push_str("</strong>");
-                } else {
-                    seg.push_str(bp);
-                }
-            }
-            out.push_str(&seg);
+fn parse_md_fence(t: &str) -> Option<(char, usize, &str)> {
+    let ch = t.chars().next()?;
+    if ch != '`' && ch != '~' {
+        return None;
+    }
+    let len = t.bytes().take_while(|&b| b == ch as u8).count();
+    (len >= 3).then_some((ch, len, &t[len..]))
+}
+
+fn is_md_fence(t: &str) -> bool {
+    parse_md_fence(t).is_some()
+}
+
+fn is_md_hr(t: &str) -> bool {
+    let non_space: Vec<char> = t.chars().filter(|c| !c.is_whitespace()).collect();
+    non_space.len() >= 3
+        && matches!(non_space[0], '-' | '*' | '_')
+        && non_space.iter().all(|&c| c == non_space[0])
+}
+
+fn md_heading_slug(s: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if (ch.is_whitespace() || ch == '-' || ch == '_') && !out.is_empty() && !prev_dash {
+            out.push('-');
+            prev_dash = true;
         }
     }
+    out.trim_matches('-').to_string()
+}
+
+fn is_md_table_candidate(t: &str) -> bool {
+    t.contains('|') && !t.starts_with('>')
+}
+
+fn split_md_table_row(row: &str) -> Vec<String> {
+    let mut s = row.trim();
+    if let Some(stripped) = s.strip_prefix('|') {
+        s = stripped;
+    }
+    if !s.ends_with("\\|") {
+        if let Some(stripped) = s.strip_suffix('|') {
+            s = stripped;
+        }
+    }
+    let mut cells = Vec::new();
+    let mut cur = String::new();
+    let mut chars = s.chars().peekable();
+    let mut in_ticks = false;
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&next) = chars.peek() {
+                if next == '|' {
+                    cur.push('|');
+                    chars.next();
+                    continue;
+                }
+            }
+            cur.push(c);
+        } else if c == '`' {
+            in_ticks = !in_ticks;
+            cur.push(c);
+        } else if c == '|' && !in_ticks {
+            cells.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(c);
+        }
+    }
+    cells.push(cur);
+    cells
+}
+
+fn parse_md_table_aligns(sep_row: &str) -> Option<Vec<&'static str>> {
+    if !sep_row.contains('|') {
+        return None;
+    }
+    let cols = split_md_table_row(sep_row);
+    if cols.is_empty() {
+        return None;
+    }
+    let mut aligns = Vec::with_capacity(cols.len());
+    for col in cols {
+        let t = col.trim();
+        let left = t.starts_with(':');
+        let right = t.ends_with(':');
+        let mid = t.trim_matches(':');
+        if mid.is_empty() || !mid.bytes().all(|b| b == b'-') {
+            return None;
+        }
+        aligns.push(match (left, right) {
+            (true, true) => "center",
+            (false, true) => "right",
+            (true, false) => "left",
+            (false, false) => "",
+        });
+    }
+    Some(aligns)
+}
+
+fn parse_md_list_marker(t: &str) -> Option<(&'static str, &str, Option<bool>)> {
+    if let Some(rest) = t
+        .strip_prefix("- ")
+        .or_else(|| t.strip_prefix("* "))
+        .or_else(|| t.strip_prefix("+ "))
+    {
+        let trim_r = rest.trim_start();
+        if let Some(body) = trim_r.strip_prefix("[ ] ") {
+            return Some(("ul", body, Some(false)));
+        }
+        if let Some(body) = trim_r.strip_prefix("[x] ").or_else(|| trim_r.strip_prefix("[X] ")) {
+            return Some(("ul", body, Some(true)));
+        }
+        return Some(("ul", trim_r, None));
+    }
+    let digits = t.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if (1..=9).contains(&digits) {
+        let after = &t[digits..];
+        if let Some(rest) = after.strip_prefix(". ").or_else(|| after.strip_prefix(") ")) {
+            return Some(("ol", rest.trim_start(), None));
+        }
+    }
+    None
+}
+
+fn sanitize_md_url(raw: &str) -> Option<String> {
+    let u = raw.trim();
+    if u.is_empty() {
+        return None;
+    }
+    let trimmed = if u.starts_with('<') && u.ends_with('>') && u.len() >= 2 {
+        &u[1..u.len() - 1]
+    } else {
+        u
+    };
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("javascript:") || lower.starts_with("vbscript:") {
+        return None;
+    }
+    if lower.starts_with("data:") && !lower.starts_with("data:image/") {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn parse_md_dest_and_title(s: &str) -> Option<(String, Option<String>, usize)> {
+    // Parse inside `(...)` starting after `(`. Handles nested parens and `"title"`.
+    let bytes = s.as_bytes();
+    let mut depth = 1usize;
+    let mut in_quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+            continue;
+        }
+        if let Some(q) = in_quote {
+            if b == q {
+                in_quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'"' || b == b'\'' {
+            in_quote = Some(b);
+            i += 1;
+            continue;
+        }
+        if b == b'(' {
+            depth += 1;
+        } else if b == b')' {
+            depth -= 1;
+            if depth == 0 {
+                let inner = s[..i].trim();
+                let (dest, title) = if inner.starts_with('<') {
+                    if let Some(end_angle) = inner.find('>') {
+                        let d = &inner[1..end_angle];
+                        let t = inner[end_angle + 1..]
+                            .trim()
+                            .trim_matches('"')
+                            .trim_matches('\'')
+                            .trim();
+                        (d, (!t.is_empty()).then_some(t.to_string()))
+                    } else {
+                        (inner, None)
+                    }
+                } else if let Some(sp) = inner.find(char::is_whitespace) {
+                    let d = inner[..sp].trim();
+                    let t = inner[sp..]
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .trim();
+                    (d, (!t.is_empty()).then_some(t.to_string()))
+                } else {
+                    (inner, None)
+                };
+                return Some((dest.to_string(), title, i + 1));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn find_matching_bracket(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut depth = 1usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+            continue;
+        }
+        if b == b'[' {
+            depth += 1;
+        } else if b == b']' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn render_inline_md(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 32);
+    let b = s.as_bytes();
+    let mut i = 0usize;
+
+    while i < s.len() {
+        // Escaped character
+        if b[i] == b'\\' && i + 1 < s.len() {
+            let next_ch = s[i + 1..].chars().next().unwrap_or('\\');
+            out.push_str(&escape_html(&next_ch.to_string()));
+            i += 1 + next_ch.len_utf8();
+            continue;
+        }
+
+        // Inline code span (` or ``)
+        if b[i] == b'`' {
+            let ticks = b[i..].iter().take_while(|&&x| x == b'`').count();
+            let delim = &s[i..i + ticks];
+            if let Some(end_rel) = s[i + ticks..].find(delim) {
+                let code_inner = &s[i + ticks..i + ticks + end_rel];
+                let trimmed_code = if code_inner.starts_with(' ')
+                    && code_inner.ends_with(' ')
+                    && code_inner.len() > 2
+                {
+                    &code_inner[1..code_inner.len() - 1]
+                } else {
+                    code_inner
+                };
+                out.push_str("<code>");
+                out.push_str(&escape_html(trimmed_code));
+                out.push_str("</code>");
+                i += ticks + end_rel + ticks;
+                continue;
+            }
+        }
+
+        // Image ![alt](src "title")
+        if b[i] == b'!' && b.get(i + 1) == Some(&b'[') {
+            if let Some(close_br) = find_matching_bracket(&s[i + 2..]) {
+                let alt = &s[i + 2..i + 2 + close_br];
+                let after_br = &s[i + 2 + close_br + 1..];
+                if let Some(rest_paren) = after_br.strip_prefix('(') {
+                    if let Some((raw_url, title, consumed)) = parse_md_dest_and_title(rest_paren) {
+                        if let Some(safe_url) = sanitize_md_url(&raw_url) {
+                            let esc_src = escape_html(&safe_url);
+                            let esc_alt = escape_html(alt);
+                            let title_attr = title
+                                .map(|t| format!(" title=\"{}\"", escape_html(&t)))
+                                .unwrap_or_default();
+                            out.push_str(&format!(
+                                "<img class=\"md-img\" src=\"{esc_src}\" data-ufo-src=\"{esc_src}\" alt=\"{esc_alt}\"{title_attr}/>"
+                            ));
+                            i += 2 + close_br + 1 + 1 + consumed;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Link [label](url "title")
+        if b[i] == b'[' {
+            if let Some(close_br) = find_matching_bracket(&s[i + 1..]) {
+                let label = &s[i + 1..i + 1 + close_br];
+                let after_br = &s[i + 1 + close_br + 1..];
+                if let Some(rest_paren) = after_br.strip_prefix('(') {
+                    if let Some((raw_url, title, consumed)) = parse_md_dest_and_title(rest_paren) {
+                        if let Some(safe_url) = sanitize_md_url(&raw_url) {
+                            let esc_href = escape_html(&safe_url);
+                            let title_attr = title
+                                .map(|t| format!(" title=\"{}\"", escape_html(&t)))
+                                .unwrap_or_default();
+                            let rendered_label = render_inline_md(label);
+                            out.push_str(&format!(
+                                "<a class=\"md-link\" href=\"{esc_href}\" data-ufo-href=\"{esc_href}\"{title_attr}>{rendered_label}</a>"
+                            ));
+                            i += 1 + close_br + 1 + 1 + consumed;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Autolink <https://...> or <http://...>
+        if b[i] == b'<' {
+            if let Some(close) = s[i + 1..].find('>') {
+                let inner = &s[i + 1..i + 1 + close];
+                if inner.starts_with("http://") || inner.starts_with("https://") {
+                    if let Some(safe) = sanitize_md_url(inner) {
+                        let esc = escape_html(&safe);
+                        out.push_str(&format!(
+                            "<a class=\"md-link\" href=\"{esc}\" data-ufo-href=\"{esc}\">{esc}</a>"
+                        ));
+                        i += 1 + close + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Strikethrough ~~text~~
+        if s[i..].starts_with("~~") {
+            if let Some(end_rel) = s[i + 2..].find("~~") {
+                if end_rel > 0 {
+                    out.push_str("<del>");
+                    out.push_str(&render_inline_md(&s[i + 2..i + 2 + end_rel]));
+                    out.push_str("</del>");
+                    i += 2 + end_rel + 2;
+                    continue;
+                }
+            }
+        }
+
+        // Bold + Italic ***text***
+        if s[i..].starts_with("***") {
+            if let Some(end_rel) = find_closing_delim(&s[i + 3..], "***") {
+                if end_rel > 0 {
+                    out.push_str("<strong><em>");
+                    out.push_str(&render_inline_md(&s[i + 3..i + 3 + end_rel]));
+                    out.push_str("</em></strong>");
+                    i += 3 + end_rel + 3;
+                    continue;
+                }
+            }
+        }
+
+        // Bold **text** or __text__
+        if s[i..].starts_with("**") || s[i..].starts_with("__") {
+            let delim = &s[i..i + 2];
+            let prev_alnum = i > 0 && s[..i].chars().next_back().is_some_and(char::is_alphanumeric);
+            if !(delim == "__" && prev_alnum) {
+                if let Some(end_rel) = find_closing_delim(&s[i + 2..], delim) {
+                    if end_rel > 0 {
+                        out.push_str("<strong>");
+                        out.push_str(&render_inline_md(&s[i + 2..i + 2 + end_rel]));
+                        out.push_str("</strong>");
+                        i += 2 + end_rel + 2;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Italic *text* or _text_ (underscore respects snake_case identifier boundaries)
+        if b[i] == b'*' || b[i] == b'_' {
+            let ch = if b[i] == b'*' { "*" } else { "_" };
+            let prev_alnum = i > 0 && s[..i].chars().next_back().is_some_and(char::is_alphanumeric);
+            let next_space = b.get(i + 1).is_none_or(|&x| x.is_ascii_whitespace());
+            if !next_space && !(ch == "_" && prev_alnum) {
+                if let Some(end_rel) = find_closing_single_emph(&s[i + 1..], ch.as_bytes()[0]) {
+                    if end_rel > 0 {
+                        out.push_str("<em>");
+                        out.push_str(&render_inline_md(&s[i + 1..i + 1 + end_rel]));
+                        out.push_str("</em>");
+                        i += 1 + end_rel + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Emit next UTF-8 character safely HTML-escaped
+        let ch = s[i..].chars().next().unwrap();
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
+        i += ch.len_utf8();
+    }
     out
+}
+
+fn find_closing_delim(s: &str, delim: &str) -> Option<usize> {
+    let mut i = 0usize;
+    while i < s.len() {
+        if s.as_bytes()[i] == b'\\' && i + 1 < s.len() {
+            i += 2;
+            continue;
+        }
+        if s.as_bytes()[i] == b'`' {
+            if let Some(end_code) = s[i + 1..].find('`') {
+                i += 1 + end_code + 1;
+                continue;
+            }
+        }
+        if s[i..].starts_with(delim) {
+            return Some(i);
+        }
+        let ch = s[i..].chars().next()?;
+        i += ch.len_utf8();
+    }
+    None
+}
+
+fn find_closing_single_emph(s: &str, delim: u8) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < s.len() {
+        if bytes[i] == b'\\' && i + 1 < s.len() {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'`' {
+            if let Some(end_code) = s[i + 1..].find('`') {
+                i += 1 + end_code + 1;
+                continue;
+            }
+        }
+        if bytes[i] == delim && bytes.get(i + 1) != Some(&delim) {
+            let prev_space = i == 0 || bytes[i - 1].is_ascii_whitespace();
+            let next_alnum = delim == b'_'
+                && bytes.get(i + 1).is_some_and(|b| b.is_ascii_alphanumeric());
+            if !prev_space && !next_alnum {
+                return Some(i);
+            }
+        }
+        let ch = s[i..].chars().next()?;
+        i += ch.len_utf8();
+    }
+    None
 }

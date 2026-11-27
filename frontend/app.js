@@ -27,7 +27,7 @@ function callWorker(action, payload) {
 }
 
 const state = {
-  tabs: [], // { id, sessionId, streamUrl, fileName, report, bytes, mode, cleanup, blobUrl, hexOffset, loadedLines, mdRaw, htmlRaw, activeSheet }
+  tabs: [], // { id, sessionId, streamUrl, assetBaseUrl, fileName, report, bytes, mode, cleanup, blobUrl, hexOffset, loadedLines, mdRaw, htmlRaw, activeSheet }
   activeTabId: null,
   infoOpen: false,
   isFullscreen: false,
@@ -35,8 +35,56 @@ const state = {
   isMobile: window.innerWidth <= 768,
   supportsWindowChrome: Boolean(Tauri),
   formatsCatalog: [],
+  localAssets: new Map(), // normalized relative path or basename -> object URL (browser multi-file / folder fallback)
   nextLocalId: 1,
 };
+
+function registerBrowserAsset(relPath, file) {
+  if (!file || !file.name) return;
+  const cleanRel = String(relPath || file.webkitRelativePath || file.name)
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "")
+    .toLowerCase();
+  const base = file.name.toLowerCase();
+  if (state.localAssets.has(cleanRel)) return;
+  const url = URL.createObjectURL(file);
+  state.localAssets.set(cleanRel, url);
+  if (!state.localAssets.has(base)) {
+    state.localAssets.set(base, url);
+  }
+}
+
+async function readDroppedEntries(dataTransfer) {
+  const items = Array.from(dataTransfer?.items || []);
+  const entries = items
+    .map((it) => (typeof it.webkitGetAsEntry === "function" ? it.webkitGetAsEntry() : null))
+    .filter(Boolean);
+  if (entries.length === 0) {
+    return Array.from(dataTransfer?.files || []).map((f) => ({
+      file: f,
+      relPath: f.webkitRelativePath || f.name,
+    }));
+  }
+  const out = [];
+  const walk = async (entry, prefix) => {
+    if (entry.isFile) {
+      const file = await new Promise((resolve) => entry.file(resolve, () => resolve(null)));
+      if (file) {
+        out.push({ file, relPath: prefix ? `${prefix}/${file.name}` : file.name });
+      }
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const nextPrefix = prefix ? `${prefix}/${entry.name}` : entry.name;
+      while (true) {
+        const batch = await new Promise((resolve) => reader.readEntries(resolve, () => resolve([])));
+        if (!batch || batch.length === 0) break;
+        for (const child of batch) await walk(child, nextPrefix);
+      }
+    }
+  };
+  for (const e of entries) await walk(e, "");
+  return out;
+}
 
 const els = {
   shell: document.getElementById("ufo-shell"),
@@ -172,6 +220,7 @@ function bindEvents() {
 
   els.fileInput.addEventListener("change", async (e) => {
     const files = Array.from(e.target.files || []);
+    for (const file of files) registerBrowserAsset(file.webkitRelativePath || file.name, file);
     for (const file of files) {
       await openBrowserFile(file);
     }
@@ -193,9 +242,12 @@ function bindEvents() {
     if (Tauri && state.supportsWindowChrome) return;
     e.preventDefault();
     els.dragOverlay.classList.add("hidden");
-    const files = Array.from(e.dataTransfer?.files || []);
-    for (const f of files) {
-      await openBrowserFile(f);
+    const dropped = await readDroppedEntries(e.dataTransfer);
+    for (const item of dropped) registerBrowserAsset(item.relPath, item.file);
+    const mdFiles = dropped.filter((item) => /\.(md|markdown|mdown|mkd)$/i.test(item.file.name));
+    const toOpen = mdFiles.length > 0 && dropped.length > 1 ? mdFiles : dropped;
+    for (const item of toOpen) {
+      await openBrowserFile(item.file);
     }
   });
 
@@ -354,7 +406,7 @@ async function openNativePath(path) {
   setLoading(true, `OPENING ${path.split(/[\\/]/).pop()}...`);
   try {
     const res = await Tauri.core.invoke("open_path", { path });
-    addTabFromSession(res.session_id, res.stream_url, res.report, null);
+    addTabFromSession(res.session_id, res.stream_url, res.report, null, res.asset_base_url || null);
   } catch (err) {
     showToastError(`Unable to open ${path}: ${err}`);
   } finally {
@@ -363,6 +415,7 @@ async function openNativePath(path) {
 }
 
 async function openBrowserFile(file) {
+  registerBrowserAsset(file.webkitRelativePath || file.name, file);
   setLoading(true, `DECODING ${file.name}...`);
   try {
     const MAX_WASM_INMEM = 256 * 1024 * 1024;
@@ -384,7 +437,7 @@ async function openRawBytes(fileName, bytes, totalSizeHint) {
       fileName,
       bytes: Array.from(bytes),
     });
-    addTabFromSession(res.session_id, res.stream_url, res.report, bytes);
+    addTabFromSession(res.session_id, res.stream_url, res.report, bytes, res.asset_base_url || null);
     return;
   }
   const report = await callWorker("open", {
@@ -392,15 +445,16 @@ async function openRawBytes(fileName, bytes, totalSizeHint) {
     bytes,
     totalSizeHint: totalSizeHint ? BigInt(totalSizeHint) : undefined,
   });
-  addTabFromSession(null, null, report, bytes);
+  addTabFromSession(null, null, report, bytes, null);
 }
 
-function addTabFromSession(sessionId, streamUrl, report, bytes) {
+function addTabFromSession(sessionId, streamUrl, report, bytes, assetBaseUrl = null) {
   const id = `tab-${state.nextLocalId++}`;
   state.tabs.push({
     id,
     sessionId,
     streamUrl,
+    assetBaseUrl,
     fileName: report.file_name,
     report,
     bytes,
@@ -1379,6 +1433,36 @@ function renderTextView(host, tab, v) {
     const body = document.createElement("div");
     body.className = "ufo-doc-view ufo-md-body";
     body.innerHTML = v.markdown_html;
+
+    // Resolve local / relative same-folder images cleanly across Tauri asset URLs and browser file drops
+    body.querySelectorAll("img.md-img").forEach((img) => {
+      const rawSrc = img.getAttribute("data-ufo-src") || img.getAttribute("src") || "";
+      const resolved = resolveMarkdownAssetUrl(tab, rawSrc);
+      if (resolved) img.src = resolved;
+      img.loading = "lazy";
+      img.addEventListener("error", () => {
+        if (img.dataset.missingHandled) return;
+        img.dataset.missingHandled = "1";
+        const badge = document.createElement("span");
+        badge.className = "md-img-missing";
+        const label = img.alt ? `${img.alt} (${rawSrc})` : rawSrc;
+        badge.innerHTML = `<i class="bi bi-image"></i> <span>${escapeHtml(label)}</span>`;
+        img.replaceWith(badge);
+      });
+    });
+
+    // Smooth in-document heading anchor links and safe link handling
+    body.addEventListener("click", (e) => {
+      const link = e.target.closest("a.md-link");
+      if (!link) return;
+      const href = link.getAttribute("data-ufo-href") || link.getAttribute("href") || "";
+      if (href.startsWith("#")) {
+        e.preventDefault();
+        const target = body.querySelector(`[id="${CSS.escape(href.slice(1))}"]`);
+        if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    });
+
     host.appendChild(bar);
     host.appendChild(body);
     bar.querySelector("#btn-md-raw").addEventListener("click", () => {
@@ -1942,44 +2026,174 @@ function toggleInfoDrawer(force) {
   if (state.infoOpen) renderInfoDrawer();
 }
 
+function normalizeRelativeAssetPath(rawSrc) {
+  let clean = String(rawSrc || "").trim().split(/[?#]/)[0];
+  try {
+    clean = decodeURIComponent(clean);
+  } catch (_) {}
+  clean = clean.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
+  const parts = [];
+  for (const seg of clean.split("/")) {
+    if (!seg || seg === ".") continue;
+    if (seg === "..") {
+      if (parts.length > 0 && parts[parts.length - 1] !== "..") parts.pop();
+      else parts.push("..");
+    } else {
+      parts.push(seg);
+    }
+  }
+  return parts.join("/");
+}
+
+function resolveMarkdownAssetUrl(tab, rawSrc) {
+  if (!rawSrc) return null;
+  if (/^(https?:|data:|blob:|ufo:|http:\/\/ufo\.localhost|file:|\/\/)/i.test(rawSrc)) {
+    return rawSrc;
+  }
+  const rel = normalizeRelativeAssetPath(rawSrc);
+  if (!rel) return null;
+  if (tab.assetBaseUrl && !rel.startsWith("..")) {
+    const encoded = rel.split("/").map((s) => encodeURIComponent(s)).join("/");
+    return `${tab.assetBaseUrl}${encoded}`;
+  }
+  const lowerRel = rel.toLowerCase();
+  if (state.localAssets.has(lowerRel)) return state.localAssets.get(lowerRel);
+  const baseName = lowerRel.split("/").pop();
+  if (baseName && state.localAssets.has(baseName)) return state.localAssets.get(baseName);
+  // Check open image tabs in memory as additional convenience fallback
+  for (const t of state.tabs) {
+    if (t.fileName && t.fileName.toLowerCase() === baseName && t.bytes) {
+      const mime = t.report?.detected?.mime || "application/octet-stream";
+      if (!t.blobUrl) t.blobUrl = URL.createObjectURL(new Blob([t.bytes], { type: mime }));
+      return t.blobUrl;
+    }
+  }
+  return null;
+}
+
 function renderInfoDrawer() {
   const tab = getActiveTab();
   if (!tab) return;
   const r = tab.report;
+  const det = r.detected;
+  const h = r.hashes;
+  const ext = (tab.fileName.includes(".") ? tab.fileName.split(".").pop() : det.id || "FILE").toUpperCase();
+
   const groups = new Map();
   for (const m of r.metadata) {
     if (!groups.has(m.section)) groups.set(m.section, []);
     groups.get(m.section).push(m);
   }
 
-  let html = `
-    <div class="ufo-kv-group">
-      <div class="ufo-kv-group-title">SIGNATURE &amp; TIMING</div>
-      <div class="ufo-kv-row"><div class="ufo-kv-k">Magic Bytes</div><div class="ufo-kv-v">${escapeHtml(r.detected.magic_hex || "(empty)")}</div></div>
-      <div class="ufo-kv-row"><div class="ufo-kv-k">Confidence</div><div class="ufo-kv-v">${escapeHtml(r.detected.confidence)}</div></div>
-      <div class="ufo-kv-row"><div class="ufo-kv-k">Parse Time</div><div class="ufo-kv-v">${(r.parse_time_us / 1000).toFixed(2)} ms (${r.parse_time_us} µs)</div></div>
-      <div class="ufo-kv-row"><div class="ufo-kv-k">Printable Ratio</div><div class="ufo-kv-v">${(r.hashes.printable_ratio * 100).toFixed(1)}%</div></div>
-    </div>
-  `;
+  const maxBin = Math.max(...h.histogram_64, 1);
+  const confidencePretty = String(det.confidence || "")
+    .replace(/([a-z])([A-Z])/g, "$1 $2");
+  const parseMs = (r.parse_time_us / 1000).toFixed(2);
+  const magicShort = det.magic_hex ? det.magic_hex.split(" ").slice(0, 6).join(" ") : "NONE (TEXT)";
 
-  const maxBin = Math.max(...r.hashes.histogram_64, 1);
-  html += `
-    <div class="ufo-kv-group">
-      <div class="ufo-kv-group-title">BYTE ENTROPY DISTRIBUTION (0x00 → 0xFF)</div>
-      <div class="ufo-entropy-bars">
-        ${r.hashes.histogram_64.map((v) => `<div class="ufo-entropy-bar" style="height:${Math.max(4, Math.round((v / maxBin) * 100))}%"></div>`).join("")}
+  let html = `
+    <div class="ufo-info-hero">
+      <div class="ufo-info-hero-top">
+        <span class="ufo-info-ext-pill">${escapeHtml(ext)} · ${escapeHtml(det.name)}</span>
+        <span class="ufo-info-conf-pill">${escapeHtml(confidencePretty)}</span>
       </div>
+      <div class="ufo-info-filename" title="${escapeHtml(tab.fileName)}">${escapeHtml(tab.fileName)}</div>
+      <div class="ufo-info-subline">
+        <span>${formatBytes(r.file_size)} (${r.file_size.toLocaleString()} B)</span>
+        <span>·</span>
+        <span>${escapeHtml(det.mime)}</span>
+        <span>·</span>
+        <span>${parseMs} ms</span>
+      </div>
+    </div>
+
+    <div class="ufo-info-metrics">
+      <div class="ufo-info-metric" title="Shannon entropy in bits per byte (8.0 max)">
+        <span class="ufo-info-metric-k">ENTROPY</span>
+        <span class="ufo-info-metric-v">${Number(h.entropy_bits || 0).toFixed(2)} b/B</span>
+      </div>
+      <div class="ufo-info-metric" title="Printable ASCII ratio across sampled bytes">
+        <span class="ufo-info-metric-k">PRINTABLE</span>
+        <span class="ufo-info-metric-v">${(h.printable_ratio * 100).toFixed(1)}%</span>
+      </div>
+      <div class="ufo-info-metric" title="${escapeHtml(det.magic_hex || 'No binary magic signature')}">
+        <span class="ufo-info-metric-k">MAGIC</span>
+        <span class="ufo-info-metric-v">${escapeHtml(magicShort)}</span>
+      </div>
+    </div>
+
+    <div class="ufo-kv-group">
+      <div class="ufo-kv-group-title">
+        <span>BYTE DISTRIBUTION (0x00 → 0xFF)</span>
+        <span class="ufo-kv-count">64 BINS</span>
+      </div>
+      <div class="ufo-entropy-bars">
+        ${h.histogram_64.map((v, idx) => {
+          const lo = (idx * 4).toString(16).padStart(2, "0").toUpperCase();
+          const hi = (idx * 4 + 3).toString(16).padStart(2, "0").toUpperCase();
+          return `<div class="ufo-entropy-bar" title="0x${lo}–0x${hi}: ${v.toLocaleString()} bytes" style="height:${Math.max(4, Math.round((v / maxBin) * 100))}%"></div>`;
+        }).join("")}
+      </div>
+    </div>
+
+    <div class="ufo-kv-group">
+      <div class="ufo-kv-group-title">
+        <span>CRYPTOGRAPHIC DIGESTS</span>
+        <span class="ufo-kv-count">CRC / SHA</span>
+      </div>
+      <div class="ufo-hash-row">
+        <span class="ufo-kv-k">CRC-32</span>
+        <span class="ufo-hash-val">${escapeHtml(h.crc32)}</span>
+        <button type="button" class="ufo-copy-mini" data-copy="${escapeHtml(h.crc32)}" title="Copy CRC-32"><i class="bi bi-copy"></i></button>
+      </div>
+      <div class="ufo-hash-row">
+        <span class="ufo-kv-k">SHA-1</span>
+        <span class="ufo-hash-val">${escapeHtml(h.sha1)}</span>
+        <button type="button" class="ufo-copy-mini" data-copy="${escapeHtml(h.sha1)}" title="Copy SHA-1"><i class="bi bi-copy"></i></button>
+      </div>
+      <div class="ufo-hash-row">
+        <span class="ufo-kv-k">SHA-256</span>
+        <span class="ufo-hash-val">${escapeHtml(h.sha256)}</span>
+        <button type="button" class="ufo-copy-mini" data-copy="${escapeHtml(h.sha256)}" title="Copy SHA-256"><i class="bi bi-copy"></i></button>
+      </div>
+    </div>
+
+    <div class="ufo-kv-group">
+      <div class="ufo-kv-group-title">
+        <span>DETECTION &amp; SIGNATURE</span>
+        <span class="ufo-kv-count">CORE</span>
+      </div>
+      <div class="ufo-kv-row"><div class="ufo-kv-k">Basis</div><div class="ufo-kv-v">${escapeHtml(det.detection_basis)}</div></div>
+      <div class="ufo-kv-row"><div class="ufo-kv-k">Magic Bytes</div><div class="ufo-kv-v">${escapeHtml(det.magic_hex || "(empty)")}</div></div>
+      <div class="ufo-kv-row"><div class="ufo-kv-k">Parse Time</div><div class="ufo-kv-v">${parseMs} ms (${r.parse_time_us.toLocaleString()} µs)</div></div>
     </div>
   `;
 
   for (const [sec, items] of groups.entries()) {
-    html += `<div class="ufo-kv-group"><div class="ufo-kv-group-title">${escapeHtml(sec.toUpperCase())}</div>`;
+    html += `
+      <div class="ufo-kv-group">
+        <div class="ufo-kv-group-title">
+          <span>${escapeHtml(sec.toUpperCase())}</span>
+          <span class="ufo-kv-count">${items.length}</span>
+        </div>
+    `;
     for (const item of items) {
       html += `<div class="ufo-kv-row"><div class="ufo-kv-k">${escapeHtml(item.key)}</div><div class="ufo-kv-v">${escapeHtml(item.value)}</div></div>`;
     }
     html += `</div>`;
   }
+
   els.infoBody.innerHTML = html;
+  els.infoBody.querySelectorAll("[data-copy]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const val = btn.dataset.copy || "";
+      navigator.clipboard?.writeText(val).catch(() => {});
+      btn.innerHTML = `<i class="bi bi-check2"></i>`;
+      setTimeout(() => {
+        btn.innerHTML = `<i class="bi bi-copy"></i>`;
+      }, 1200);
+    });
+  });
 }
 
 function openResaveModal() {

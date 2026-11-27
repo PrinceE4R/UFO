@@ -1425,3 +1425,199 @@ fn decodes_psd_figcraft_vectorcraft_pcraft_and_xfig_pages_and_layers() {
         other => panic!("Expected Xfig LayeredDesign, got {other:?}"),
     }
 }
+
+#[test]
+fn decodes_gfm_markdown_tables_images_links_and_tasks() {
+    let md = concat!(
+        "# Report Heading\n\n",
+        "Intro paragraph with **bold**, *italic*, ~~strike~~, and `code_name` with snake_case_var.\n\n",
+        "![Architecture Diagram](./diagram.png \"System Overview\")\n\n",
+        "See [Docs](https://example.org/docs) and [Report Heading](#report-heading).\n\n",
+        "| Metric | Value | Notes |\n",
+        "| :--- | :---: | ---: |\n",
+        "| Triangles | **42** | `mesh_a` |\n",
+        "| Coverage | 100% | escaped \\| pipe |\n\n",
+        "- [x] Fix tables\n",
+        "- [ ] Fix relative images\n\n",
+        "1. First ordered item\n",
+        "2. Second ordered item\n\n",
+        "```markdown\n",
+        "| fake | table |\n",
+        "| --- | --- |\n",
+        "```\n"
+    );
+
+    let rep = open_bytes("README.md", md.as_bytes(), None);
+    assert_eq!(rep.detected.id, "md");
+    match rep.viewer {
+        ViewerPayload::Text { markdown_html: Some(html), .. } => {
+            assert!(html.contains("<a id=\"report-heading\" class=\"md-anchor\" aria-hidden=\"true\"></a><h1>"), "Missing slug heading: {html}");
+            assert!(html.contains("<table class=\"md-table\">"), "Missing GFM table: {html}");
+            assert!(html.contains("<th style=\"text-align:center\">Value</th>"), "Missing table alignment: {html}");
+            assert!(html.contains("<td style=\"text-align:right\">escaped | pipe</td>"), "Missing escaped pipe cell: {html}");
+            assert!(html.contains("data-ufo-src=\"./diagram.png\""), "Missing local image attr: {html}");
+            assert!(html.contains("href=\"https://example.org/docs\""), "Missing link: {html}");
+            assert!(html.contains("<del>strike</del>"), "Missing strikethrough: {html}");
+            assert!(html.contains("<em>italic</em>"), "Missing italic: {html}");
+            assert!(html.contains("snake_case_var"), "snake_case damaged: {html}");
+            assert!(!html.contains("snake<em>case</em>var"), "snake_case falsely italicized: {html}");
+            assert!(html.contains("type=\"checkbox\" disabled checked"), "Missing checked task: {html}");
+            assert!(html.contains("<ol>"), "Missing ordered list: {html}");
+            assert!(html.contains("<pre class=\"md-code\" data-lang=\"markdown\">"), "Missing fenced block: {html}");
+        }
+        other => panic!("Expected Markdown Text payload, got {other:?}"),
+    }
+}
+
+#[test]
+fn decodes_unlisted_step_open_shell_ifc_extrusion_and_iges_surfaces() {
+    // 1. Loose OPEN_SHELL STEP file not wrapped inside MANIFOLD_SOLID_BREP or SHAPE_REPRESENTATION
+    let loose_step = concat!(
+        "ISO-10303-21;\n",
+        "HEADER;\n",
+        "FILE_DESCRIPTION(('Open surface'),'2;1');\n",
+        "FILE_NAME('surface.step','','','','','','');\n",
+        "FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\n",
+        "ENDSEC;\n",
+        "DATA;\n",
+        "#1=CARTESIAN_POINT('',(0.,0.,0.));\n",
+        "#2=CARTESIAN_POINT('',(20.,0.,0.));\n",
+        "#3=CARTESIAN_POINT('',(0.,20.,0.));\n",
+        "#4=DIRECTION('',(0.,0.,1.));\n",
+        "#5=DIRECTION('',(1.,0.,0.));\n",
+        "#6=DIRECTION('',(0.,1.,0.));\n",
+        "#7=DIRECTION('',(-0.70710678,0.70710678,0.));\n",
+        "#8=AXIS2_PLACEMENT_3D('',#1,#4,#5);\n",
+        "#9=PLANE('',#8);\n",
+        "#10=VERTEX_POINT('',#1);\n",
+        "#11=VERTEX_POINT('',#2);\n",
+        "#12=VERTEX_POINT('',#3);\n",
+        "#20=VECTOR('',#5,20.);\n",
+        "#21=VECTOR('',#7,28.284271);\n",
+        "#22=VECTOR('',#6,20.);\n",
+        "#30=LINE('',#1,#20);\n",
+        "#31=LINE('',#2,#21);\n",
+        "#32=LINE('',#3,#22);\n",
+        "#40=EDGE_CURVE('',#10,#11,#30,.T.);\n",
+        "#41=EDGE_CURVE('',#11,#12,#31,.T.);\n",
+        "#42=EDGE_CURVE('',#12,#10,#32,.T.);\n",
+        "#50=ORIENTED_EDGE('',*,*,#40,.T.);\n",
+        "#51=ORIENTED_EDGE('',*,*,#41,.T.);\n",
+        "#52=ORIENTED_EDGE('',*,*,#42,.T.);\n",
+        "#60=EDGE_LOOP('',(#50,#51,#52));\n",
+        "#70=FACE_OUTER_BOUND('',#60,.T.);\n",
+        "#80=ADVANCED_FACE('PlateSurface',(#70),#9,.T.);\n",
+        "#90=OPEN_SHELL('OpenSheet',(#80));\n",
+        "ENDSEC;\n",
+        "END-ISO-10303-21;\n"
+    );
+    let rep_step = open_bytes("loose_surface.step", loose_step.as_bytes(), None);
+    assert_eq!(rep_step.detected.id, "step");
+    match rep_step.viewer {
+        ViewerPayload::Mesh3d { triangle_count, format_label, .. } => {
+            assert!(format_label.contains("Solidcore"), "Expected Solidcore label: {format_label}");
+            assert!(triangle_count >= 1, "Expected triangles from loose STEP OPEN_SHELL, got {triangle_count}");
+        }
+        other => panic!("Expected Mesh3d for loose STEP surface, got {other:?}"),
+    }
+
+    // 2. IFC building element with IFCTRIANGULATEDFACESET + IFCEXTRUDEDAREASOLID
+    let ifc = concat!(
+        "ISO-10303-21;\n",
+        "HEADER;\n",
+        "FILE_DESCRIPTION(('ViewDefinition [CoordinationView]'),'2;1');\n",
+        "FILE_NAME('wall.ifc','','','','','','');\n",
+        "FILE_SCHEMA(('IFC4'));\n",
+        "ENDSEC;\n",
+        "DATA;\n",
+        "#1=IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);\n",
+        "#10=IFCCARTESIANPOINT((0.,0.,0.));\n",
+        "#11=IFCDIRECTION((0.,0.,1.));\n",
+        "#12=IFCDIRECTION((1.,0.,0.));\n",
+        "#13=IFCAXIS2PLACEMENT3D('',#10,#11,#12);\n",
+        "#20=IFCRECTANGLEPROFILEDEF(.AREA.,'WallRect',$,2.0,0.2);\n",
+        "#21=IFCEXTRUDEDAREASOLID(#20,#13,#11,3.0);\n",
+        "ENDSEC;\n",
+        "END-ISO-10303-21;\n"
+    );
+    let rep_ifc = open_bytes("wall.ifc", ifc.as_bytes(), None);
+    assert_eq!(rep_ifc.detected.id, "ifc");
+    match rep_ifc.viewer {
+        ViewerPayload::Mesh3d { triangle_count, .. } => {
+            assert!(triangle_count >= 12, "Expected 12 triangles for IFC extruded box, got {triangle_count}");
+        }
+        other => panic!("Expected Mesh3d for IFC extrusion, got {other:?}"),
+    }
+
+    // 3. Minimal IGES 5.3 Type 128 B-spline surface translated to STEP and tessellated (strict <=64-col P records)
+    let iges = [
+        format!("{:<72}S{:>7}", "Simple planar B-spline surface", 1),
+        format!("{:<72}G{:>7}", "1H,,1H;,6HIGES,5H1.0,2,2HMM,1,0.01;", 1),
+        format!("{:>8}{:>8}{:>8}{:>8}{:>8}{:>8}{:>8}{:>8}{:>8}D{:>7}", 128, 1, 0, 0, 0, 0, 0, 0, "00000001", 1),
+        format!("{:>8}{:>8}{:>8}{:>8}{:>8}{:>24}{:>8}D{:>7}", 128, 0, 0, 3, 0, "", "PATCH1", 2),
+        format!("{:<64}{:>8}P{:>7}", "128,1,1,1,1,0,0,1,0,0,0.0,0.0,1.0,1.0,0.0,0.0,1.0,1.0,", 1, 1),
+        format!("{:<64}{:>8}P{:>7}", "1.0,1.0,1.0,1.0,0.0,0.0,0.0,10.0,0.0,0.0,", 1, 2),
+        format!("{:<64}{:>8}P{:>7}", "0.0,10.0,0.0,10.0,10.0,0.0;", 1, 3),
+        format!("{:<72}T{:>7}", "S      1G      1D      2P      3", 1),
+    ]
+    .join("\n");
+    let rep_iges = open_bytes("patch.iges", iges.as_bytes(), None);
+    assert_eq!(rep_iges.detected.id, "iges");
+    match rep_iges.viewer {
+        ViewerPayload::Mesh3d { triangle_count, .. } => {
+            assert!(triangle_count >= 1, "Expected triangles from IGES surface, got {triangle_count}");
+        }
+        other => panic!("Expected Mesh3d for IGES patch, got {other:?}"),
+    }
+
+    // 4. STEP solid where one face is malformed (#9999 missing): resilient surface recovery must keep valid faces
+    let partial_step = concat!(
+        "ISO-10303-21;\n",
+        "HEADER;\n",
+        "FILE_DESCRIPTION(('Partial recovery'),'2;1');\n",
+        "FILE_NAME('partial.step','','','','','','');\n",
+        "FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\n",
+        "ENDSEC;\n",
+        "DATA;\n",
+        "#1=CARTESIAN_POINT('',(0.,0.,0.));\n",
+        "#2=CARTESIAN_POINT('',(10.,0.,0.));\n",
+        "#3=CARTESIAN_POINT('',(0.,10.,0.));\n",
+        "#4=DIRECTION('',(0.,0.,1.));\n",
+        "#5=DIRECTION('',(1.,0.,0.));\n",
+        "#6=DIRECTION('',(0.,1.,0.));\n",
+        "#7=DIRECTION('',(-0.70710678,0.70710678,0.));\n",
+        "#8=AXIS2_PLACEMENT_3D('',#1,#4,#5);\n",
+        "#9=PLANE('',#8);\n",
+        "#10=VERTEX_POINT('',#1);\n",
+        "#11=VERTEX_POINT('',#2);\n",
+        "#12=VERTEX_POINT('',#3);\n",
+        "#20=VECTOR('',#5,10.);\n",
+        "#21=VECTOR('',#7,14.142136);\n",
+        "#22=VECTOR('',#6,10.);\n",
+        "#30=LINE('',#1,#20);\n",
+        "#31=LINE('',#2,#21);\n",
+        "#32=LINE('',#3,#22);\n",
+        "#40=EDGE_CURVE('',#10,#11,#30,.T.);\n",
+        "#41=EDGE_CURVE('',#11,#12,#31,.T.);\n",
+        "#42=EDGE_CURVE('',#12,#10,#32,.T.);\n",
+        "#50=ORIENTED_EDGE('',*,*,#40,.T.);\n",
+        "#51=ORIENTED_EDGE('',*,*,#41,.T.);\n",
+        "#52=ORIENTED_EDGE('',*,*,#42,.T.);\n",
+        "#60=EDGE_LOOP('',(#50,#51,#52));\n",
+        "#70=FACE_OUTER_BOUND('',#60,.T.);\n",
+        "#80=ADVANCED_FACE('ValidFace',(#70),#9,.T.);\n",
+        "#81=ADVANCED_FACE('BrokenFace',(#70),#9999,.T.);\n",
+        "#90=CLOSED_SHELL('',(#80,#81));\n",
+        "#100=MANIFOLD_SOLID_BREP('PartialSolid',#90);\n",
+        "ENDSEC;\n",
+        "END-ISO-10303-21;\n"
+    );
+    let rep_partial = open_bytes("partial.step", partial_step.as_bytes(), None);
+    assert_eq!(rep_partial.detected.id, "step");
+    match rep_partial.viewer {
+        ViewerPayload::Mesh3d { triangle_count, .. } => {
+            assert!(triangle_count >= 1, "Expected resilient recovery of ValidFace despite BrokenFace, got {triangle_count}");
+        }
+        other => panic!("Expected Mesh3d from partial STEP recovery, got {other:?}"),
+    }
+}

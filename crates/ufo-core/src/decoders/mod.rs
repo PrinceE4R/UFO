@@ -9,4 +9,5 @@ pub mod hex_bin;
 pub mod image;
 pub mod media;
 pub mod mesh3d;
+pub mod solidcore_cad;
 pub mod text;
